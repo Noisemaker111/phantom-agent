@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phantom Agent - Connect Wallet</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            text-align: center;
+            max-width: 400px;
+        }
+        .logo {
+            width: 80px;
+            height: 80px;
+            background: linear-gradient(135deg, #ab9ff2 0%, #7b6fd9 100%);
+            border-radius: 20px;
+            margin: 0 auto 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .logo svg {
+            width: 50px;
+            height: 50px;
+            fill: white;
+        }
+        h1 {
+            font-size: 24px;
+            margin: 0 0 12px;
+            font-weight: 600;
+        }
+        p {
+            color: #8b949e;
+            margin: 0 0 32px;
+            line-height: 1.5;
+        }
+        .button {
+            background: linear-gradient(135deg, #ab9ff2 0%, #7b6fd9 100%);
+            color: white;
+            border: none;
+            padding: 14px 28px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(171, 159, 242, 0.3);
+        }
+        .button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .loading {
+            display: none;
+            margin-top: 24px;
+        }
+        .loading.active {
+            display: block;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(171, 159, 242, 0.3);
+            border-top-color: #ab9ff2;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .error {
+            background: rgba(248, 81, 73, 0.1);
+            color: #f85149;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 24px;
+            display: none;
+        }
+        .error.active {
+            display: block;
+        }
+        .success {
+            background: rgba(35, 197, 94, 0.1);
+            color: #23c55e;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+            </svg>
+        </div>
+        <h1>Connect Phantom Wallet</h1>
+        <p>Click the button below to authenticate with your Phantom wallet and grant access to Phantom Agent.</p>
+        
+        <button class="button" id="connectBtn" onclick="startAuth()">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+            Connect with Phantom
+        </button>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Waiting for authentication...</p>
+        </div>
+        
+        <div class="error" id="error"></div>
+        
+        <div id="debug" style="margin-top: 40px; padding: 16px; background: rgba(255,255,255,0.05); border-radius: 8px; font-family: monospace; font-size: 12px; color: #8b949e; text-align: left; display: none;"></div>
+    </div>
+
+    <script>
+        // Configuration
+        const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
+        const EXTENSION_ID = new URLSearchParams(window.location.search).get('extension_id') || 'cbojakbkbiepfeccbakkemmfhjpinhmd';
+        
+        // Debug logging
+        function log(msg) {
+            console.log('[Auth Page]', msg);
+            const debug = document.getElementById('debug');
+            if (debug) {
+                debug.style.display = 'block';
+                debug.innerHTML += msg + '<br>';
+            }
+        }
+        
+        log('Page loaded');
+        log('Extension ID: ' + EXTENSION_ID);
+        log('App ID: ' + PHANTOM_APP_ID);
+        
+        function showError(msg) {
+            const errorEl = document.getElementById('error');
+            errorEl.textContent = msg;
+            errorEl.classList.add('active');
+            document.getElementById('loading').classList.remove('active');
+            document.getElementById('connectBtn').disabled = false;
+        }
+        
+        function startAuth() {
+            log('Starting auth...');
+            
+            document.getElementById('connectBtn').disabled = true;
+            document.getElementById('loading').classList.add('active');
+            document.getElementById('error').classList.remove('active');
+            
+            // Build the auth URL
+            const redirectUrl = `https://${EXTENSION_ID}.chromiumapp.org/callback`;
+            const state = Math.random().toString(36).substring(2, 15);
+            
+            const params = new URLSearchParams({
+                app_id: PHANTOM_APP_ID,
+                redirect_uri: redirectUrl,
+                provider: 'google',
+                state: state
+            });
+            
+            const authUrl = `https://connect.phantom.app/login?${params.toString()}`;
+            log('Auth URL: ' + authUrl);
+            
+            // Open Phantom Connect in the same window
+            window.location.href = authUrl;
+        }
+        
+        // Check if we're returning from auth (have callback params)
+        function checkCallback() {
+            const urlParams = new URLSearchParams(window.location.search);
+            
+            log('Checking callback...');
+            log('URL: ' + window.location.href);
+            
+            const walletId = urlParams.get('wallet_id');
+            const organizationId = urlParams.get('organization_id');
+            const userId = urlParams.get('user_id') || urlParams.get('auth_user_id');
+            const publicKey = urlParams.get('public_key');
+            const error = urlParams.get('error');
+            
+            if (error) {
+                log('Auth error: ' + error);
+                showError('Authentication failed: ' + error);
+                return;
+            }
+            
+            if (walletId && organizationId && userId) {
+                log('Auth success! Sending to extension...');
+                
+                // Send message back to extension
+                const sessionData = {
+                    userId,
+                    walletId,
+                    organizationId,
+                    publicKey: publicKey || ''
+                };
+                
+                // Try to send message to extension
+                if (chrome && chrome.runtime && chrome.runtime.sendMessage) {
+                    chrome.runtime.sendMessage(EXTENSION_ID, {
+                        type: 'AUTH_COMPLETE',
+                        session: sessionData
+                    }, (response) => {
+                        if (chrome.runtime.lastError) {
+                            log('Extension message error: ' + chrome.runtime.lastError.message);
+                            // Fallback: show success and instruct user to close
+                            showSuccessAndClose(sessionData);
+                        } else {
+                            log('Message sent to extension successfully');
+                            showSuccessAndClose(sessionData);
+                        }
+                    });
+                } else {
+                    log('Chrome runtime not available');
+                    showSuccessAndClose(sessionData);
+                }
+            }
+        }
+        
+        function showSuccessAndClose(sessionData) {
+            document.body.innerHTML = `
+                <div class="container">
+                    <div class="logo" style="background: #23c55e;">
+                        <svg viewBox="0 0 24 24" fill="white" width="50" height="50">
+                            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                        </svg>
+                    </div>
+                    <h1 style="color: #23c55e;">Connected!</h1>
+                    <div class="success">
+                        <p><strong>Wallet:</strong> ${sessionData.walletId.substring(0, 10)}...</p>
+                        <p>Your Phantom wallet has been connected to the extension.</p>
+                    </div>
+                    <p style="margin-top: 24px; color: #8b949e;">You can close this window and return to the extension.</p>
+                    <button class="button" onclick="window.close()" style="margin-top: 16px;">Close Window</button>
+                </div>
+            `;
+            
+            // Also try to close automatically after 3 seconds
+            setTimeout(() => {
+                window.close();
+            }, 3000);
+        }
+        
+        // Check for callback on load
+        checkCallback();
+    </script>
+</body>
+</html>
