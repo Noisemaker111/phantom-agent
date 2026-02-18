@@ -56,27 +56,6 @@ function broadcastSessionChange(session: PhantomSession | null): void {
 }
 
 // ---------------------------------------------------------------------------
-// Check if Phantom extension is installed
-// ---------------------------------------------------------------------------
-
-async function isPhantomInstalled(): Promise<boolean> {
-  return new Promise((resolve) => {
-    // Try to send a message to Phantom extension
-    chrome.runtime.sendMessage(
-      "bfnaelmomeimhlpmgjnjophhpkkoljpa", // Phantom extension ID
-      { method: "ping" },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          resolve(false);
-        } else {
-          resolve(true);
-        }
-      }
-    );
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Connect using Phantom browser extension
 // ---------------------------------------------------------------------------
 
@@ -84,21 +63,8 @@ async function initiateAuth(): Promise<PhantomSession> {
   console.log("[Phantom] Connecting via browser extension...");
   await logToStorage("EXTENSION_AUTH_START", {});
   
-  // Check if Phantom is installed
-  const hasPhantom = await isPhantomInstalled();
-  console.log("[Phantom] Extension installed:", hasPhantom);
-  await logToStorage("PHANTOM_CHECK", { installed: hasPhantom });
-  
-  if (!hasPhantom) {
-    // Open Phantom download page
-    chrome.tabs.create({
-      url: "https://phantom.app/download",
-      active: true,
-    });
-    throw new Error("Phantom wallet extension not installed. Please install it and try again.");
-  }
-  
   // Use Phantom's connect method
+  console.log("[Phantom] Sending connect request...");
   return new Promise((resolve, reject) => {
     // Send connect request to Phantom extension
     chrome.runtime.sendMessage(
