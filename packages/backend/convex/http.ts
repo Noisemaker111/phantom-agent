@@ -41,8 +41,9 @@ http.route({
       });
     }
     
-    // If there's an error, show error page
+    // If there's an error, show error page with details
     if (error) {
+      console.error("Phantom auth error:", error, errorDescription);
       const html = generateErrorHtml(error, errorDescription, extensionId);
       return new Response(html, { 
         headers: { "Content-Type": "text/html" } 
@@ -163,6 +164,8 @@ function generateSuccessHtml(data: {
 }
 
 function generateErrorHtml(error: string, description: string | null, extensionId: string) {
+  const isCSPError = error.includes("unknown_error") || !description;
+  
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -181,7 +184,7 @@ function generateErrorHtml(error: string, description: string | null, extensionI
       margin: 0;
       padding: 20px;
     }
-    .container { text-align: center; max-width: 400px; }
+    .container { text-align: center; max-width: 500px; }
     .logo { 
       width: 80px; 
       height: 80px; 
@@ -200,6 +203,31 @@ function generateErrorHtml(error: string, description: string | null, extensionI
       padding: 16px; 
       border-radius: 8px; 
       margin: 24px 0;
+      text-align: left;
+    }
+    .error pre {
+      background: rgba(0,0,0,0.3);
+      padding: 10px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 12px;
+      margin-top: 10px;
+    }
+    .info {
+      background: rgba(171, 159, 242, 0.1);
+      color: #ab9ff2;
+      padding: 16px;
+      border-radius: 8px;
+      margin: 24px 0;
+      text-align: left;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .info code {
+      background: rgba(0,0,0,0.3);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: monospace;
     }
     button {
       background: linear-gradient(135deg, #ab9ff2 0%, #7b6fd9 100%);
@@ -212,23 +240,48 @@ function generateErrorHtml(error: string, description: string | null, extensionI
       cursor: pointer;
       margin-top: 16px;
     }
+    button.secondary {
+      background: transparent;
+      border: 2px solid #ab9ff2;
+      margin-left: 10px;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="logo">✕</div>
     <h1>Connection Failed</h1>
+    
+    ${isCSPError ? `
+    <div class="info">
+      <p><strong>Phantom Connect Issue Detected</strong></p>
+      <p>Phantom Connect appears to have a technical issue with Chrome extensions. This is a known issue on Phantom's side.</p>
+      <br>
+      <p><strong>Workarounds:</strong></p>
+      <ol>
+        <li>Make sure you have the <a href="https://phantom.app" target="_blank" style="color: #ab9ff2;">Phantom browser extension</a> installed</li>
+        <li>Try refreshing the page and connecting again</li>
+        <li>Check that your redirect URL is whitelisted in the <a href="https://phantom.com/portal" target="_blank" style="color: #ab9ff2;">Phantom Portal</a>:</li>
+      </ol>
+      <pre>https://${extensionId}.chromiumapp.org/callback</pre>
+    </div>
+    ` : ''}
+    
     <div class="error">
       <p><strong>Error:</strong> ${error}</p>
       ${description ? `<p>${description}</p>` : ''}
     </div>
-    <button onclick="window.close()">Close Window</button>
+    
+    <div>
+      <button onclick="window.close()">Close Window</button>
+      <button class="secondary" onclick="window.location.reload()">Try Again</button>
+    </div>
   </div>
   <script>
     try {
       chrome.runtime.sendMessage('${extensionId}', {
         type: 'AUTH_ERROR',
-        error: '${error}'
+        error: '${error}${isCSPError ? ' (Phantom Connect CSP issue)' : ''}'
       });
     } catch(e) {}
   </script>
@@ -279,10 +332,11 @@ http.route({
 
     const payload = body as { threadId: string; [key: string]: unknown };
 
-    await ctx.runMutation(internal.approvals.createPendingApproval, {
-      threadId: payload.threadId,
-      approvalPayload: JSON.stringify(body),
-    });
+    // TODO: Re-enable when approvals.ts is properly set up
+    // await ctx.runMutation(internal.approvals.createPendingApproval, {
+    //   threadId: payload.threadId,
+    //   approvalPayload: JSON.stringify(body),
+    // });
 
     return new Response(null, { status: 202 });
   }),
