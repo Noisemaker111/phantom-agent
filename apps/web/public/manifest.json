@@ -38,6 +38,10 @@
     "activeTab"
   ],
 
+  "externally_connectable": {
+    "matches": ["https://*.convex.site/*", "https://*.convex.cloud/*"]
+  },
+
   "host_permissions": [
     "https://connect.phantom.app/*",
     "https://*.convex.cloud/*",
