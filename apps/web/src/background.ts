@@ -1,15 +1,13 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Auth approach: Use Phantom Connect via Convex-hosted redirect page
- * This avoids CSP issues by having the auth flow happen through a proper web origin
+ * Uses Phantom REST API directly to avoid CSP issues
  */
 
 /// <reference types="chrome" />
 
 const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
-const PHANTOM_CONNECT_URL = "https://connect.phantom.app/login";
-const CONVEX_SITE_URL = "https://tough-nightingale-94.convex.site"; // Your Convex site
+const PHANTOM_API_BASE = "https://api.phantom.app";
 
 export type PhantomSession = {
   userId: string;
@@ -27,9 +25,9 @@ export type ExtensionMessage =
   | { type: "SESSION_RESULT"; session: PhantomSession | null }
   | { type: "ERROR"; message: string; details?: string };
 
-// Auth state
-let authInProgress = false;
-let pendingAuthPromise: { resolve: (s: PhantomSession) => void; reject: (e: Error) => void } | null = null;
+let authTabId: number | null = null;
+let authPromiseResolve: ((s: PhantomSession) => void) | null = null;
+let authPromiseReject: ((e: Error) => void) | null = null;
 
 async function logToStorage(context: string, data: unknown): Promise<void> {
   const result = await chrome.storage.local.get("phantom_logs");
@@ -61,149 +59,216 @@ function broadcastSessionChange(session: PhantomSession | null): void {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
-// Build auth URL that goes through Convex first, then to Phantom
-function buildAuthUrl(): string {
-  // Use a simple state parameter
-  const state = Math.random().toString(36).substring(2, 15);
-  
-  // Store state temporarily
-  chrome.storage.local.set({ phantom_auth_state: state });
-  
-  // Build URL: Extension -> Convex auth page -> Phantom -> back to Extension
-  // The Convex page will handle the Phantom redirect and send data back
-  const params = new URLSearchParams({
-    app_id: PHANTOM_APP_ID,
-    state: state,
-    extension_id: chrome.runtime.id,
-  });
-  
-  return `${CONVEX_SITE_URL}/auth/phantom-connect?${params.toString()}`;
-}
+// ---------------------------------------------------------------------------
+// Direct API Auth Flow
+// ---------------------------------------------------------------------------
 
-async function initiateSSOFlow(): Promise<PhantomSession> {
-  console.log("[Phantom] Starting auth flow...");
+async function initiateAuth(): Promise<PhantomSession> {
+  console.log("[Phantom] Starting direct API auth...");
   await logToStorage("AUTH_START", { appId: PHANTOM_APP_ID });
   
-  if (authInProgress) {
-    throw new Error("Authentication already in progress");
+  const redirectUrl = chrome.identity.getRedirectURL("callback");
+  console.log("[Phantom] Redirect URL:", redirectUrl);
+  await logToStorage("REDIRECT_URL", redirectUrl);
+  
+  // Try calling Phantom's SSO init endpoint directly
+  try {
+    const initResponse = await fetch(`${PHANTOM_API_BASE}/v1/connect/init`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-App-Id": PHANTOM_APP_ID,
+      },
+      body: JSON.stringify({
+        provider: "google",
+        redirect_uri: redirectUrl,
+        app_id: PHANTOM_APP_ID,
+      }),
+    });
+    
+    console.log("[Phantom] Init response status:", initResponse.status);
+    await logToStorage("INIT_RESPONSE", { status: initResponse.status });
+    
+    if (!initResponse.ok) {
+      const errorText = await initResponse.text();
+      console.error("[Phantom] Init failed:", errorText);
+      throw new Error(`Phantom API error: ${initResponse.status} - ${errorText}`);
+    }
+    
+    const initData = await initResponse.json();
+    console.log("[Phantom] Init data:", initData);
+    await logToStorage("INIT_DATA", initData);
+    
+    // Should return an auth_url to open
+    const authUrl = initData.auth_url || initData.url;
+    if (!authUrl) {
+      throw new Error("No auth_url returned from Phantom");
+    }
+    
+    return openAuthTab(authUrl);
+  } catch (error) {
+    // If API fails, fallback to direct URL construction
+    console.warn("[Phantom] API init failed, trying direct URL:", error);
+    await logToStorage("API_FALLBACK", { error: String(error) });
+    
+    // Construct direct auth URL
+    const params = new URLSearchParams({
+      app_id: PHANTOM_APP_ID,
+      redirect_uri: redirectUrl,
+      provider: "google",
+    });
+    
+    const directUrl = `https://connect.phantom.app/login?${params.toString()}`;
+    return openAuthTab(directUrl);
   }
-  
-  authInProgress = true;
-  
-  // Open auth in new tab (not popup) to avoid CSP issues
-  const authUrl = buildAuthUrl();
-  console.log("[Phantom] Auth URL:", authUrl);
-  await logToStorage("AUTH_URL", authUrl);
+}
+
+function openAuthTab(authUrl: string): Promise<PhantomSession> {
+  console.log("[Phantom] Opening auth URL:", authUrl);
   
   return new Promise((resolve, reject) => {
-    pendingAuthPromise = { resolve, reject };
+    authPromiseResolve = resolve;
+    authPromiseReject = reject;
     
     chrome.tabs.create({
       url: authUrl,
       active: true,
     }, (tab) => {
       if (!tab.id) {
-        authInProgress = false;
-        pendingAuthPromise = null;
+        authPromiseResolve = null;
+        authPromiseReject = null;
         reject(new Error("Failed to open auth tab"));
         return;
       }
       
-      const tabId = tab.id;
-      console.log("[Phantom] Auth tab opened:", tabId);
+      authTabId = tab.id;
+      console.log("[Phantom] Auth tab opened:", tab.id);
       
-      // Timeout after 10 minutes
+      // Timeout after 5 minutes
       setTimeout(() => {
-        if (authInProgress && pendingAuthPromise) {
-          authInProgress = false;
-          pendingAuthPromise = null;
-          chrome.tabs.remove(tabId).catch(() => {});
-          reject(new Error("Authentication timeout"));
+        if (authTabId === tab.id && authPromiseReject) {
+          chrome.tabs.remove(tab.id).catch(() => {});
+          authPromiseReject(new Error("Authentication timeout"));
+          cleanupAuth();
         }
-      }, 600000);
+      }, 300000);
     });
   });
 }
 
-// Listen for messages from the auth page
-chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
-  console.log("[Phantom] External message:", message, "from:", sender.origin);
-  
-  // Only accept messages from our Convex site
-  if (!sender.origin?.includes("convex.site")) {
-    return false;
-  }
-  
-  if (message.type === "PHANTOM_AUTH_COMPLETE") {
-    const { walletId, organizationId, userId, publicKey, state } = message;
-    
-    // Verify state matches
-    chrome.storage.local.get("phantom_auth_state").then((result) => {
-      if (result.phantom_auth_state !== state) {
-        console.error("[Phantom] State mismatch!");
-        if (pendingAuthPromise) {
-          pendingAuthPromise.reject(new Error("Security error: state mismatch"));
-        }
-        return;
-      }
-      
-      // Clear state
-      chrome.storage.local.remove("phantom_auth_state");
-      
-      if (!walletId || !organizationId || !userId) {
-        if (pendingAuthPromise) {
-          pendingAuthPromise.reject(new Error("Missing auth data"));
-        }
-        return;
-      }
-      
-      const session: PhantomSession = {
-        userId,
-        walletId,
-        organizationId,
-        publicKey: publicKey || "",
-        createdAt: Date.now(),
-      };
-      
-      saveSession(session).then(() => {
-        broadcastSessionChange(session);
-        if (pendingAuthPromise) {
-          pendingAuthPromise.resolve(session);
-        }
-        authInProgress = false;
-        pendingAuthPromise = null;
-      });
-    });
-    
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  if (message.type === "PHANTOM_AUTH_ERROR") {
-    const { error } = message;
-    console.error("[Phantom] Auth error from page:", error);
-    
-    if (pendingAuthPromise) {
-      pendingAuthPromise.reject(new Error(error));
-    }
-    authInProgress = false;
-    pendingAuthPromise = null;
-    
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  return false;
-});
-
-async function disconnect(): Promise<void> {
-  await clearSession();
-  broadcastSessionChange(null);
+function cleanupAuth(): void {
+  authTabId = null;
+  authPromiseResolve = null;
+  authPromiseReject = null;
 }
 
-// Internal message handler
+// ---------------------------------------------------------------------------
+// Tab Update Handler - Watch for redirect
+// ---------------------------------------------------------------------------
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tabId !== authTabId || !authPromiseResolve) return;
+  
+  if (changeInfo.url) {
+    console.log("[Phantom] Tab URL updated:", changeInfo.url);
+    
+    // Check if this is our redirect URL
+    if (changeInfo.url.includes("chromiumapp.org/callback")) {
+      handleAuthCallback(changeInfo.url, tabId);
+    }
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === authTabId && authPromiseReject) {
+    authPromiseReject(new Error("Authentication cancelled"));
+    cleanupAuth();
+  }
+});
+
+async function handleAuthCallback(url: string, tabId: number): Promise<void> {
+  console.log("[Phantom] Handling auth callback:", url);
+  await logToStorage("AUTH_CALLBACK", url);
+  
+  try {
+    const urlObj = new URL(url);
+    const params = urlObj.searchParams;
+    
+    const error = params.get("error");
+    const errorDescription = params.get("error_description");
+    
+    if (error) {
+      const errMsg = `Auth error: ${error}${errorDescription ? ` - ${errorDescription}` : ""}`;
+      console.error("[Phantom]", errMsg);
+      await logToStorage("AUTH_ERROR", { error, errorDescription });
+      
+      if (authPromiseReject) {
+        authPromiseReject(new Error(errMsg));
+      }
+      cleanupAuth();
+      chrome.tabs.remove(tabId).catch(() => {});
+      return;
+    }
+    
+    // Extract session data
+    const walletId = params.get("wallet_id");
+    const organizationId = params.get("organization_id");
+    const userId = params.get("user_id") || params.get("auth_user_id");
+    const publicKey = params.get("public_key");
+    
+    console.log("[Phantom] Auth data:", { walletId, organizationId, userId });
+    await logToStorage("AUTH_DATA", { walletId, organizationId, userId });
+    
+    if (!walletId || !organizationId || !userId) {
+      const missing = [];
+      if (!walletId) missing.push("wallet_id");
+      if (!organizationId) missing.push("organization_id");
+      if (!userId) missing.push("user_id");
+      
+      const err = `Missing auth params: ${missing.join(", ")}`;
+      if (authPromiseReject) {
+        authPromiseReject(new Error(err));
+      }
+      cleanupAuth();
+      chrome.tabs.remove(tabId).catch(() => {});
+      return;
+    }
+    
+    // Success!
+    const session: PhantomSession = {
+      userId,
+      walletId,
+      organizationId,
+      publicKey: publicKey || "",
+      createdAt: Date.now(),
+    };
+    
+    await saveSession(session);
+    broadcastSessionChange(session);
+    
+    if (authPromiseResolve) {
+      authPromiseResolve(session);
+    }
+    
+    cleanupAuth();
+    chrome.tabs.remove(tabId).catch(() => {});
+    
+  } catch (error) {
+    console.error("[Phantom] Error handling callback:", error);
+    if (authPromiseReject) {
+      authPromiseReject(error instanceof Error ? error : new Error(String(error)));
+    }
+    cleanupAuth();
+    chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Message Handler
+// ---------------------------------------------------------------------------
+
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
-  console.log("[Phantom] Internal message:", message.type);
+  console.log("[Phantom] Message:", message.type);
   
   switch (message.type) {
     case "GET_SESSION":
@@ -217,7 +282,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       return true;
       
     case "CONNECT":
-      initiateSSOFlow()
+      initiateAuth()
         .then(session => sendResponse({ type: "SESSION_RESULT", session }))
         .catch(err => {
           logToStorage("CONNECT_ERROR", { message: err.message, stack: err.stack });
@@ -230,7 +295,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       return true;
       
     case "DISCONNECT":
-      disconnect()
+      clearSession()
         .then(() => sendResponse({ type: "SESSION_RESULT", session: null }))
         .catch(err => sendResponse({ type: "ERROR", message: err.message }));
       return true;
@@ -245,6 +310,4 @@ chrome.action.onClicked.addListener((tab) => {
   if (tab.id) chrome.sidePanel.open({ tabId: tab.id });
 });
 
-console.log("[Phantom] Background service worker loaded");
-console.log("[Phantom] Extension ID:", chrome.runtime.id);
-console.log("[Phantom] Convex URL:", CONVEX_SITE_URL);
+console.log("[Phantom] Extension loaded, ID:", chrome.runtime.id);
