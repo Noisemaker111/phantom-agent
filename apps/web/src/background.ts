@@ -1,13 +1,10 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Uses Phantom browser extension directly instead of Phantom Connect
- * This avoids the CSP bugs in Phantom Connect
+ * Uses content script to communicate with Phantom wallet (avoids CSP issues)
  */
 
 /// <reference types="chrome" />
-
-const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
 
 export type PhantomSession = {
   userId: string;
@@ -56,77 +53,67 @@ function broadcastSessionChange(session: PhantomSession | null): void {
 }
 
 // ---------------------------------------------------------------------------
-// Connect using Phantom browser extension
+// Connect using Phantom via content script
 // ---------------------------------------------------------------------------
 
 async function initiateAuth(): Promise<PhantomSession> {
-  console.log("[Phantom] Connecting via browser extension...");
-  await logToStorage("EXTENSION_AUTH_START", {});
+  console.log("[Phantom] Starting auth via content script...");
+  await logToStorage("CONTENT_AUTH_START", {});
   
-  // Use Phantom's connect method
-  console.log("[Phantom] Sending connect request...");
-  return new Promise((resolve, reject) => {
-    // Send connect request to Phantom extension
-    chrome.runtime.sendMessage(
-      "bfnaelmomeimhlpmgjnjophhpkkoljpa", // Phantom extension ID
-      {
-        method: "connect",
-        params: {
-          appId: PHANTOM_APP_ID,
-          // Request permissions
-          permissions: {
-            wallet: ["read", "write"],
-          },
-        },
-      },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          const err = chrome.runtime.lastError.message;
-          console.error("[Phantom] Connect error:", err);
-          logToStorage("CONNECT_ERROR", { error: err });
-          reject(new Error(`Phantom connection failed: ${err}`));
-          return;
-        }
-        
-        console.log("[Phantom] Connect response:", response);
-        logToStorage("CONNECT_RESPONSE", response);
-        
-        if (response?.error) {
-          reject(new Error(response.error.message || "Connection rejected"));
-          return;
-        }
-        
-        if (!response?.publicKey) {
-          reject(new Error("No public key returned from Phantom"));
-          return;
-        }
-        
-        // Build session from Phantom response
-        const session: PhantomSession = {
-          userId: response.publicKey,
-          walletId: response.publicKey,
-          organizationId: "phantom-browser",
-          publicKey: response.publicKey,
-          createdAt: Date.now(),
-        };
-        
-        saveSession(session).then(() => {
-          broadcastSessionChange(session);
-          resolve(session);
-        });
-      }
-    );
-  });
+  // Find an active tab to inject content script
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length === 0 || !tabs[0].id) {
+    throw new Error("No active tab found");
+  }
+  
+  const tabId = tabs[0].id;
+  console.log("[Phantom] Using tab:", tabId);
+  
+  // First check if Phantom is available
+  console.log("[Phantom] Checking for Phantom...");
+  const checkResponse = await chrome.tabs.sendMessage(tabId, { type: "CHECK_PHANTOM" });
+  console.log("[Phantom] Check response:", checkResponse);
+  await logToStorage("PHANTOM_CHECK", checkResponse);
+  
+  if (!checkResponse?.hasPhantom) {
+    // Open Phantom download page
+    chrome.tabs.create({
+      url: "https://phantom.app/download",
+      active: true,
+    });
+    throw new Error("Phantom wallet extension not detected. Please install it and refresh the page.");
+  }
+  
+  // Try to connect
+  console.log("[Phantom] Connecting...");
+  const connectResponse = await chrome.tabs.sendMessage(tabId, { type: "CONNECT_PHANTOM" });
+  console.log("[Phantom] Connect response:", connectResponse);
+  await logToStorage("CONNECT_RESPONSE", connectResponse);
+  
+  if (connectResponse?.error) {
+    throw new Error(connectResponse.error);
+  }
+  
+  if (!connectResponse?.success || !connectResponse?.publicKey) {
+    throw new Error("Connection failed - no public key returned");
+  }
+  
+  // Build session
+  const session: PhantomSession = {
+    userId: connectResponse.publicKey,
+    walletId: connectResponse.publicKey,
+    organizationId: "phantom-browser",
+    publicKey: connectResponse.publicKey,
+    createdAt: Date.now(),
+  };
+  
+  await saveSession(session);
+  broadcastSessionChange(session);
+  
+  return session;
 }
 
 async function disconnect(): Promise<void> {
-  // Disconnect from Phantom extension
-  chrome.runtime.sendMessage(
-    "bfnaelmomeimhlpmgjnjophhpkkoljpa",
-    { method: "disconnect" },
-    () => {}
-  );
-  
   await clearSession();
   broadcastSessionChange(null);
 }
