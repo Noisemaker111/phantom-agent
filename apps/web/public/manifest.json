@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "description": "Natural language control over your Phantom embedded wallet.",
 
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2mAEqMkNSGe7d/iXq8pqzoR5JiiHLpeDf9dTD54MYpdAU8k0pbZdPAwnEOXy5XHsmE4uVvuDLH6byq6UI7FySxFfXPzuhgLPN5R+bONNnq4lzmEoCWpr8QjG5bh+NxNe8NdEhcDenjV3yEW7dWnC0JLE5c9scBOyBgu9jVQxPCfFBoATi9C9PCpgwqE4+wAHiQfrR6iHC/THOMUMvPvaJEab3pkk/iF1/4WrN5O+xnv4jMEOK54sakLyJatJiX6KZxOi4tp6z/67cSjpNfGZKfoeljtmXwst5gP0taUKY7fWsdqnSCLdI6ViIHrQ+4LkVscj19LEPlPEIf5WZjE8mwIDAQAB",
+
   "icons": {
     "16": "icons/icon.svg",
     "32": "icons/icon.svg",
