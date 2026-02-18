@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Phantom purple background circle -->
+  <circle cx="64" cy="64" r="60" fill="#AB9FF2"/>
+  
+  <!-- White ghost shape -->
+  <path d="M64 28 C48 28, 36 42, 36 64 C36 86, 48 100, 64 100 C80 100, 92 86, 92 64 C92 42, 80 28, 64 28 Z" fill="white"/>
+  
+  <!-- Eyes -->
+  <ellipse cx="54" cy="58" rx="5" ry="8" fill="#AB9FF2"/>
+  <ellipse cx="74" cy="58" rx="5" ry="8" fill="#AB9FF2"/>
+</svg>

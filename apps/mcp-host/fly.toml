@@ -1,4 +1,7 @@
-# fly.toml - Fly.io deployment configuration for phantom-agent MCP host
+# fly.toml app configuration file generated for phantom-agent-mcp on 2026-02-18T17:42:55-05:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
 app = 'phantom-agent-mcp'
 primary_region = 'iad'
@@ -7,8 +10,8 @@ primary_region = 'iad'
   dockerfile = 'Dockerfile'
 
 [env]
-  PORT = '8080'
   NODE_ENV = 'production'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
@@ -18,16 +21,15 @@ primary_region = 'iad'
   min_machines_running = 1
   processes = ['app']
 
+  [[http_service.checks]]
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+    protocol = 'http'
+
 [[vm]]
   cpu_kind = 'shared'
   cpus = 1
   memory_mb = 512
-
-# Health check configuration
-[[http_service.checks]]
-  interval = '15s'
-  timeout = '5s'
-  grace_period = '10s'
-  method = 'GET'
-  path = '/health'
-  protocol = 'http'
