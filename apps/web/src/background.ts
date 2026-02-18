@@ -8,7 +8,7 @@
 /// <reference types="chrome" />
 
 const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e"; // Your App ID
-const PHANTOM_CONNECT_URL = "https://connect.phantom.app/v1/sso";
+const PHANTOM_CONNECT_URL = "https://connect.phantom.app/login";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,15 +75,17 @@ async function initiateSSOFlow(): Promise<PhantomSession> {
   console.log("[Phantom] Redirect URL:", redirectUrl);
   await logToStorage("REDIRECT_URL", redirectUrl);
   
-  // Build SSO URL exactly as per Phantom docs
-  // Note: We're NOT generating keys client-side - Phantom handles that
+  // Build SSO URL
+  // Phantom Connect login endpoint
   const params = new URLSearchParams({
     app_id: PHANTOM_APP_ID,
     redirect_uri: redirectUrl,
     provider: "google",
+    // Add a random state parameter for security
+    state: Math.random().toString(36).substring(7),
   });
   
-  const ssoUrl = `https://connect.phantom.app/login?${params.toString()}`;
+  const ssoUrl = `${PHANTOM_CONNECT_URL}?${params.toString()}`;
   console.log("[Phantom] SSO URL:", ssoUrl);
   await logToStorage("SSO_URL", ssoUrl);
   
