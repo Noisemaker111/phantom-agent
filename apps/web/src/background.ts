@@ -1,12 +1,13 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Uses hosted auth page on Convex to avoid CSP issues
+ * Uses Phantom browser extension directly instead of Phantom Connect
+ * This avoids the CSP bugs in Phantom Connect
  */
 
 /// <reference types="chrome" />
 
-const CONVEX_SITE_URL = "https://tough-nightingale-94.convex.site";
+const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
 
 export type PhantomSession = {
   userId: string;
@@ -22,14 +23,7 @@ export type ExtensionMessage =
   | { type: "DISCONNECT" }
   | { type: "SESSION_CHANGED"; session: PhantomSession | null }
   | { type: "SESSION_RESULT"; session: PhantomSession | null }
-  | { type: "ERROR"; message: string; details?: string }
-  // External messages from auth page
-  | { type: "AUTH_COMPLETE"; session: PhantomSession }
-  | { type: "AUTH_ERROR"; error: string };
-
-let authTabId: number | null = null;
-let pendingResolve: ((s: PhantomSession) => void) | null = null;
-let pendingReject: ((e: Error) => void) | null = null;
+  | { type: "ERROR"; message: string; details?: string };
 
 async function logToStorage(context: string, data: unknown): Promise<void> {
   const result = await chrome.storage.local.get("phantom_logs");
@@ -62,118 +56,117 @@ function broadcastSessionChange(session: PhantomSession | null): void {
 }
 
 // ---------------------------------------------------------------------------
-// Auth Flow - Open hosted page on Convex
+// Check if Phantom extension is installed
 // ---------------------------------------------------------------------------
 
-async function initiateAuth(): Promise<PhantomSession> {
-  console.log("[Phantom] Starting hosted auth flow...");
-  await logToStorage("HOSTED_AUTH_START", { extensionId: chrome.runtime.id });
-  
-  const authUrl = `${CONVEX_SITE_URL}/auth/callback?extension_id=${chrome.runtime.id}`;
-  console.log("[Phantom] Opening:", authUrl);
-  await logToStorage("AUTH_URL", authUrl);
-  
-  return new Promise((resolve, reject) => {
-    pendingResolve = resolve;
-    pendingReject = reject;
-    
-    chrome.tabs.create({ url: authUrl, active: true }, (tab) => {
-      if (!tab.id) {
-        cleanupAuth();
-        reject(new Error("Failed to open auth tab"));
-        return;
-      }
-      
-      authTabId = tab.id;
-      console.log("[Phantom] Auth tab opened:", tab.id);
-      
-      // Timeout after 5 minutes
-      setTimeout(() => {
-        if (authTabId === tab.id && pendingReject) {
-          chrome.tabs.remove(tab.id).catch(() => {});
-          pendingReject(new Error("Authentication timeout"));
-          cleanupAuth();
+async function isPhantomInstalled(): Promise<boolean> {
+  return new Promise((resolve) => {
+    // Try to send a message to Phantom extension
+    chrome.runtime.sendMessage(
+      "bfnaelmomeimhlpmgjnjophhpkkoljpa", // Phantom extension ID
+      { method: "ping" },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+        } else {
+          resolve(true);
         }
-      }, 300000);
-    });
+      }
+    );
   });
 }
 
-function cleanupAuth(): void {
-  authTabId = null;
-  pendingResolve = null;
-  pendingReject = null;
+// ---------------------------------------------------------------------------
+// Connect using Phantom browser extension
+// ---------------------------------------------------------------------------
+
+async function initiateAuth(): Promise<PhantomSession> {
+  console.log("[Phantom] Connecting via browser extension...");
+  await logToStorage("EXTENSION_AUTH_START", {});
+  
+  // Check if Phantom is installed
+  const hasPhantom = await isPhantomInstalled();
+  console.log("[Phantom] Extension installed:", hasPhantom);
+  await logToStorage("PHANTOM_CHECK", { installed: hasPhantom });
+  
+  if (!hasPhantom) {
+    // Open Phantom download page
+    chrome.tabs.create({
+      url: "https://phantom.app/download",
+      active: true,
+    });
+    throw new Error("Phantom wallet extension not installed. Please install it and try again.");
+  }
+  
+  // Use Phantom's connect method
+  return new Promise((resolve, reject) => {
+    // Send connect request to Phantom extension
+    chrome.runtime.sendMessage(
+      "bfnaelmomeimhlpmgjnjophhpkkoljpa", // Phantom extension ID
+      {
+        method: "connect",
+        params: {
+          appId: PHANTOM_APP_ID,
+          // Request permissions
+          permissions: {
+            wallet: ["read", "write"],
+          },
+        },
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          const err = chrome.runtime.lastError.message;
+          console.error("[Phantom] Connect error:", err);
+          logToStorage("CONNECT_ERROR", { error: err });
+          reject(new Error(`Phantom connection failed: ${err}`));
+          return;
+        }
+        
+        console.log("[Phantom] Connect response:", response);
+        logToStorage("CONNECT_RESPONSE", response);
+        
+        if (response?.error) {
+          reject(new Error(response.error.message || "Connection rejected"));
+          return;
+        }
+        
+        if (!response?.publicKey) {
+          reject(new Error("No public key returned from Phantom"));
+          return;
+        }
+        
+        // Build session from Phantom response
+        const session: PhantomSession = {
+          userId: response.publicKey,
+          walletId: response.publicKey,
+          organizationId: "phantom-browser",
+          publicKey: response.publicKey,
+          createdAt: Date.now(),
+        };
+        
+        saveSession(session).then(() => {
+          broadcastSessionChange(session);
+          resolve(session);
+        });
+      }
+    );
+  });
+}
+
+async function disconnect(): Promise<void> {
+  // Disconnect from Phantom extension
+  chrome.runtime.sendMessage(
+    "bfnaelmomeimhlpmgjnjophhpkkoljpa",
+    { method: "disconnect" },
+    () => {}
+  );
+  
+  await clearSession();
+  broadcastSessionChange(null);
 }
 
 // ---------------------------------------------------------------------------
-// Listen for external messages from hosted auth page
-// ---------------------------------------------------------------------------
-
-chrome.runtime.onMessageExternal.addListener((message: any, sender, sendResponse) => {
-  console.log("[Phantom] External message:", message?.type, "from:", sender.origin);
-  
-  // Only accept from our Convex site
-  if (!sender.origin?.includes("convex.site")) {
-    console.warn("[Phantom] Rejected message from:", sender.origin);
-    return false;
-  }
-  
-  if (message?.type === "AUTH_COMPLETE" && message.session) {
-    console.log("[Phantom] Auth complete!");
-    
-    const session: PhantomSession = {
-      userId: message.session.userId,
-      walletId: message.session.walletId,
-      organizationId: message.session.organizationId,
-      publicKey: message.session.publicKey || "",
-      createdAt: Date.now(),
-    };
-    
-    // Save session
-    saveSession(session).then(() => {
-      broadcastSessionChange(session);
-      if (pendingResolve) {
-        pendingResolve(session);
-        cleanupAuth();
-      }
-    });
-    
-    // Close the auth tab
-    if (authTabId) {
-      chrome.tabs.remove(authTabId).catch(() => {});
-    }
-    
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  if (message?.type === "AUTH_ERROR") {
-    console.error("[Phantom] Auth error:", message.error);
-    if (pendingReject) {
-      pendingReject(new Error(message.error || "Authentication failed"));
-      cleanupAuth();
-    }
-    if (authTabId) {
-      chrome.tabs.remove(authTabId).catch(() => {});
-    }
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  return false;
-});
-
-// Also listen for tab close
-chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === authTabId && pendingReject) {
-    console.log("[Phantom] Auth tab closed by user");
-    pendingReject(new Error("Authentication cancelled"));
-    cleanupAuth();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Internal message handler
+// Message handler
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
@@ -204,7 +197,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       return true;
       
     case "DISCONNECT":
-      clearSession()
+      disconnect()
         .then(() => sendResponse({ type: "SESSION_RESULT", session: null }))
         .catch(err => sendResponse({ type: "ERROR", message: err.message }));
       return true;
