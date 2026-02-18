@@ -1,18 +1,13 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Uses Phantom Connect HTTP API directly (not SDK)
- * Docs: https://docs.phantom.com/connect
+ * Uses Phantom Connect HTTP API via popup window
  */
 
 /// <reference types="chrome" />
 
-const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e"; // Your App ID
+const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
 const PHANTOM_CONNECT_URL = "https://connect.phantom.app/login";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export type PhantomSession = {
   userId: string;
@@ -30,9 +25,21 @@ export type ExtensionMessage =
   | { type: "SESSION_RESULT"; session: PhantomSession | null }
   | { type: "ERROR"; message: string; details?: string };
 
-// ---------------------------------------------------------------------------
-// Storage
-// ---------------------------------------------------------------------------
+// Store the current auth attempt
+let currentAuthTabId: number | null = null;
+let authCallback: ((session: PhantomSession | null, error?: string) => void) | null = null;
+
+async function logToStorage(context: string, data: unknown): Promise<void> {
+  const result = await chrome.storage.local.get("phantom_logs");
+  const logs = result.phantom_logs || [];
+  logs.push({
+    timestamp: Date.now(),
+    context,
+    data: typeof data === "string" ? data : JSON.stringify(data),
+  });
+  if (logs.length > 50) logs.shift();
+  await chrome.storage.local.set({ phantom_logs: logs });
+}
 
 async function saveSession(session: PhantomSession): Promise<void> {
   await chrome.storage.local.set({ phantom_session: session });
@@ -44,28 +51,104 @@ async function loadSession(): Promise<PhantomSession | null> {
 }
 
 async function clearSession(): Promise<void> {
-  await chrome.storage.local.remove("phantantom_session");
+  await chrome.storage.local.remove("phantom_session");
 }
 
-// ---------------------------------------------------------------------------
-// Logging
-// ---------------------------------------------------------------------------
+function broadcastSessionChange(session: PhantomSession | null): void {
+  const message: ExtensionMessage = { type: "SESSION_CHANGED", session };
+  chrome.runtime.sendMessage(message).catch(() => {});
+}
 
-async function logToStorage(context: string, data: unknown): Promise<void> {
-  const logs = (await chrome.storage.local.get("phantom_logs")).phantom_logs || [];
-  logs.push({
-    timestamp: Date.now(),
-    context,
-    data: typeof data === "string" ? data : JSON.stringify(data),
+// Build SSO URL
+function buildSSOUrl(redirectUrl: string): string {
+  const params = new URLSearchParams({
+    app_id: PHANTOM_APP_ID,
+    redirect_uri: redirectUrl,
+    provider: "google",
+    state: Math.random().toString(36).substring(2, 15),
   });
-  // Keep only last 50 logs
-  if (logs.length > 50) logs.shift();
-  await chrome.storage.local.set({ phantom_logs: logs });
+  return `${PHANTOM_CONNECT_URL}?${params.toString()}`;
 }
 
-// ---------------------------------------------------------------------------
-// SSO Flow
-// ---------------------------------------------------------------------------
+// Listen for tab updates to catch the redirect
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!currentAuthTabId || tabId !== currentAuthTabId) return;
+  if (!authCallback) return;
+  
+  // Check if URL changed
+  if (changeInfo.url) {
+    logToStorage("TAB_UPDATED", { url: changeInfo.url });
+    
+    // Check if this is our redirect URL
+    if (changeInfo.url.includes("chromiumapp.org/callback")) {
+      logToStorage("REDIRECT_DETECTED", changeInfo.url);
+      
+      // Parse the URL
+      const url = new URL(changeInfo.url);
+      const searchParams = url.searchParams;
+      
+      const error = searchParams.get("error");
+      const errorDescription = searchParams.get("error_description");
+      
+      if (error) {
+        const errMsg = `Auth error: ${error}${errorDescription ? ` - ${errorDescription}` : ""}`;
+        logToStorage("AUTH_ERROR", { error, errorDescription });
+        authCallback(null, errMsg);
+      } else {
+        // Extract tokens/data from URL
+        const walletId = searchParams.get("wallet_id");
+        const organizationId = searchParams.get("organization_id");
+        const userId = searchParams.get("user_id") || searchParams.get("auth_user_id");
+        const publicKey = searchParams.get("public_key");
+        
+        logToStorage("AUTH_SUCCESS", { walletId, organizationId, userId, hasPublicKey: !!publicKey });
+        
+        if (!walletId || !organizationId || !userId) {
+          const missing = [];
+          if (!walletId) missing.push("wallet_id");
+          if (!organizationId) missing.push("organization_id");
+          if (!userId) missing.push("user_id");
+          authCallback(null, `Missing required params: ${missing.join(", ")}`);
+        } else {
+          const session: PhantomSession = {
+            userId,
+            walletId,
+            organizationId,
+            publicKey: publicKey || "",
+            createdAt: Date.now(),
+          };
+          authCallback(session);
+        }
+      }
+      
+      // Close the tab
+      chrome.tabs.remove(tabId).catch(() => {});
+      currentAuthTabId = null;
+      authCallback = null;
+    }
+  }
+  
+  // Handle tab close
+  if (changeInfo.status === "complete" && tab.url?.includes("chromiumapp.org/callback")) {
+    setTimeout(() => {
+      if (currentAuthTabId === tabId && authCallback) {
+        authCallback(null, "Authentication cancelled");
+        currentAuthTabId = null;
+        authCallback = null;
+      }
+    }, 1000);
+  }
+});
+
+// Listen for tab removal
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (currentAuthTabId === tabId && authCallback) {
+    logToStorage("TAB_CLOSED", { tabId });
+    authCallback(null, "Authentication cancelled - tab closed");
+    currentAuthTabId = null;
+    authCallback = null;
+  }
+});
 
 async function initiateSSOFlow(): Promise<PhantomSession> {
   console.log("[Phantom] Starting SSO flow...");
@@ -75,120 +158,58 @@ async function initiateSSOFlow(): Promise<PhantomSession> {
   console.log("[Phantom] Redirect URL:", redirectUrl);
   await logToStorage("REDIRECT_URL", redirectUrl);
   
-  // Build SSO URL
-  // Phantom Connect login endpoint
-  const params = new URLSearchParams({
-    app_id: PHANTOM_APP_ID,
-    redirect_uri: redirectUrl,
-    provider: "google",
-    // Add a random state parameter for security
-    state: Math.random().toString(36).substring(7),
-  });
-  
-  const ssoUrl = `${PHANTOM_CONNECT_URL}?${params.toString()}`;
+  const ssoUrl = buildSSOUrl(redirectUrl);
   console.log("[Phantom] SSO URL:", ssoUrl);
   await logToStorage("SSO_URL", ssoUrl);
   
-  // Launch auth flow
-  let responseUrl: string;
-  try {
-    responseUrl = await new Promise((resolve, reject) => {
-      chrome.identity.launchWebAuthFlow(
-        { url: ssoUrl, interactive: true },
-        (url) => {
-          if (chrome.runtime.lastError) {
-            const err = chrome.runtime.lastError.message;
-            console.error("[Phantom] launchWebAuthFlow error:", err);
-            reject(new Error(`Chrome error: ${err}`));
-            return;
-          }
-          if (!url) {
-            reject(new Error("No redirect URL returned"));
-            return;
-          }
-          resolve(url);
+  return new Promise((resolve, reject) => {
+    // Open a popup window
+    chrome.windows.create({
+      url: ssoUrl,
+      type: "popup",
+      width: 500,
+      height: 700,
+      focused: true,
+    }, (window) => {
+      if (!window || !window.tabs || window.tabs.length === 0) {
+        reject(new Error("Failed to open authentication window"));
+        return;
+      }
+      
+      currentAuthTabId = window.tabs[0].id!;
+      authCallback = (session, error) => {
+        if (error) {
+          reject(new Error(error));
+        } else if (session) {
+          // Save session
+          saveSession(session).then(() => {
+            broadcastSessionChange(session);
+            resolve(session);
+          });
+        } else {
+          reject(new Error("Authentication failed"));
         }
-      );
+      };
+      
+      // Timeout after 5 minutes
+      setTimeout(() => {
+        if (currentAuthTabId === window.tabs![0].id && authCallback) {
+          chrome.windows.remove(window.id!).catch(() => {});
+          authCallback(null, "Authentication timeout");
+          currentAuthTabId = null;
+          authCallback = null;
+        }
+      }, 300000);
     });
-  } catch (error) {
-    await logToStorage("WEBAUTH_ERROR", error);
-    throw error;
-  }
-  
-  console.log("[Phantom] Got response URL:", responseUrl);
-  await logToStorage("RESPONSE_URL", responseUrl);
-  
-  // Parse the response
-  const url = new URL(responseUrl);
-  const searchParams = url.searchParams;
-  
-  const error = searchParams.get("error");
-  const errorDescription = searchParams.get("error_description");
-  
-  if (error) {
-    const errMsg = `Auth error: ${error}${errorDescription ? ` - ${errorDescription}` : ""}`;
-    console.error("[Phantom]", errMsg);
-    await logToStorage("AUTH_ERROR", { error, errorDescription });
-    throw new Error(errMsg);
-  }
-  
-  // Extract tokens/data from URL
-  // Phantom returns wallet info in the URL after successful auth
-  const walletId = searchParams.get("wallet_id");
-  const organizationId = searchParams.get("organization_id");
-  const userId = searchParams.get("user_id") || searchParams.get("auth_user_id");
-  const publicKey = searchParams.get("public_key");
-  
-  console.log("[Phantom] Response params:", { walletId, organizationId, userId, publicKey });
-  await logToStorage("RESPONSE_PARAMS", { walletId, organizationId, userId, hasPublicKey: !!publicKey });
-  
-  if (!walletId || !organizationId || !userId) {
-    const missing = [];
-    if (!walletId) missing.push("wallet_id");
-    if (!organizationId) missing.push("organization_id");
-    if (!userId) missing.push("user_id/auth_user_id");
-    const err = `Missing required params: ${missing.join(", ")}`;
-    await logToStorage("MISSING_PARAMS", { walletId, organizationId, userId });
-    throw new Error(err);
-  }
-  
-  const session: PhantomSession = {
-    userId,
-    walletId,
-    organizationId,
-    publicKey: publicKey || "",
-    createdAt: Date.now(),
-  };
-  
-  await saveSession(session);
-  await logToStorage("SESSION_SAVED", session);
-  
-  // Register with Convex
-  try {
-    const convexUrl = process.env.VITE_CONVEX_SITE_URL;
-    if (convexUrl) {
-      await fetch(`${convexUrl}/auth/register-session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          walletId,
-          organizationId,
-          sessionToken: publicKey || walletId,
-        }),
-      });
-    }
-  } catch (e) {
-    console.warn("[Phantom] Convex registration failed:", e);
-  }
-  
-  return session;
+  });
 }
 
-// ---------------------------------------------------------------------------
-// Message Handler
-// ---------------------------------------------------------------------------
+async function disconnect(): Promise<void> {
+  await clearSession();
+  broadcastSessionChange(null);
+}
 
+// Message handler
 chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   console.log("[Phantom] Message received:", message.type);
   
@@ -217,7 +238,7 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
       return true;
       
     case "DISCONNECT":
-      clearSession()
+      disconnect()
         .then(() => sendResponse({ type: "SESSION_RESULT", session: null }))
         .catch(err => sendResponse({ type: "ERROR", message: err.message }));
       return true;
@@ -227,17 +248,10 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendRe
   }
 });
 
-// ---------------------------------------------------------------------------
-// Side Panel
-// ---------------------------------------------------------------------------
-
+// Side panel
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id) chrome.sidePanel.open({ tabId: tab.id });
 });
-
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
 
 console.log("[Phantom] Background service worker loaded");
 console.log("[Phantom] App ID:", PHANTOM_APP_ID);
