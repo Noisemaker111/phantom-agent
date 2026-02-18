@@ -1,37 +1,14 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
- *
- * Responsibilities:
- * 1. Phantom SSO flow with stamper keypair generation
- * 2. Secure session + stamper secret key persistence in chrome.storage.local
- * 3. Session refresh (stamper keys don't expire, but session may be revoked)
- * 4. Message passing to/from sidepanel and popup UIs
- * 5. Side panel open-on-click behaviour
- *
- * The session stored here is the source of truth. The UI surfaces read it
- * via chrome.storage.local.get and message passing.
- *
- * SSO Flow (Phantom's custom flow, not standard OAuth):
- * 1. Generate ed25519 keypair (stamper keys) locally
- * 2. Build SSO URL: https://connect.phantom.app/login?public_key=<pubkey>&...
- * 3. chrome.identity.launchWebAuthFlow opens browser tab
- * 4. User authenticates with Phantom (Google/Apple SSO)
- * 5. Redirect back with wallet_id, organization_id, auth_user_id in URL
- * 6. Store stamper secret key + wallet data
- *
- * No token exchange — stamper keys authenticate API requests directly.
+ * 
+ * Uses Phantom Connect HTTP API directly (not SDK)
+ * Docs: https://docs.phantom.com/connect
  */
 
 /// <reference types="chrome" />
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const PHANTOM_APP_ID = process.env.VITE_PHANTOM_APP_ID ?? "";
-const PHANTOM_CONNECT_URL = "https://connect.phantom.app/login";
-
-const STORAGE_KEY_SESSION = "phantom_session";
+const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e"; // Your App ID
+const PHANTOM_CONNECT_URL = "https://connect.phantom.app/v1/sso";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,15 +18,8 @@ export type PhantomSession = {
   userId: string;
   walletId: string;
   organizationId: string;
-  /** Base64url-encoded ed25519 private key (stamper secret key) */
-  stamperSecretKey: string;
-  /** Base64url-encoded ed25519 public key */
-  stamperPublicKey: string;
+  publicKey: string;
   createdAt: number;
-};
-
-type StoredSession = {
-  session: PhantomSession;
 };
 
 export type ExtensionMessage =
@@ -58,249 +28,214 @@ export type ExtensionMessage =
   | { type: "DISCONNECT" }
   | { type: "SESSION_CHANGED"; session: PhantomSession | null }
   | { type: "SESSION_RESULT"; session: PhantomSession | null }
-  | { type: "ERROR"; message: string };
+  | { type: "ERROR"; message: string; details?: string };
 
 // ---------------------------------------------------------------------------
-// Crypto helpers — generate ed25519 keypair for stamper
+// Storage
 // ---------------------------------------------------------------------------
-
-/**
- * Generate an ed25519 keypair for use as stamper keys.
- * Returns base64url-encoded keys.
- */
-async function generateStamperKeypair(): Promise<{ publicKey: string; secretKey: string }> {
-  // Ed25519 is available in Web Crypto as "Ed25519"
-  const keyPair = await crypto.subtle.generateKey(
-    { name: "Ed25519" },
-    true, // extractable
-    ["sign", "verify"]
-  );
-
-  // Export public key
-  const publicKeyBuffer = await crypto.subtle.exportKey("raw", keyPair.publicKey);
-  const publicKey = base64UrlEncode(publicKeyBuffer);
-
-  // Export private key
-  const privateKeyBuffer = await crypto.subtle.exportKey("raw", keyPair.privateKey);
-  const secretKey = base64UrlEncode(privateKeyBuffer);
-
-  return { publicKey, secretKey };
-}
-
-function base64UrlEncode(buffer: ArrayBuffer): string {
-  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=/g, "");
-}
-
-function generateSessionId(): string {
-  const array = new Uint8Array(16);
-  crypto.getRandomValues(array);
-  return base64UrlEncode(array.buffer);
-}
-
-// ---------------------------------------------------------------------------
-// Session storage
-// ---------------------------------------------------------------------------
-
-async function loadSession(): Promise<PhantomSession | null> {
-  const result = await chrome.storage.local.get(STORAGE_KEY_SESSION);
-  const stored = result[STORAGE_KEY_SESSION] as StoredSession | undefined;
-  return stored?.session ?? null;
-}
 
 async function saveSession(session: PhantomSession): Promise<void> {
-  const stored: StoredSession = { session };
-  await chrome.storage.local.set({ [STORAGE_KEY_SESSION]: stored });
+  await chrome.storage.local.set({ phantom_session: session });
+}
+
+async function loadSession(): Promise<PhantomSession | null> {
+  const result = await chrome.storage.local.get("phantom_session");
+  return result.phantom_session ?? null;
 }
 
 async function clearSession(): Promise<void> {
-  await chrome.storage.local.remove(STORAGE_KEY_SESSION);
-}
-
-function broadcastSessionChange(session: PhantomSession | null): void {
-  const message: ExtensionMessage = { type: "SESSION_CHANGED", session };
-  chrome.runtime.sendMessage(message).catch(() => {
-    // No listeners open — safe to ignore
-  });
+  await chrome.storage.local.remove("phantantom_session");
 }
 
 // ---------------------------------------------------------------------------
-// SSO Flow (Phantom's custom flow, not OAuth)
+// Logging
+// ---------------------------------------------------------------------------
+
+async function logToStorage(context: string, data: unknown): Promise<void> {
+  const logs = (await chrome.storage.local.get("phantom_logs")).phantom_logs || [];
+  logs.push({
+    timestamp: Date.now(),
+    context,
+    data: typeof data === "string" ? data : JSON.stringify(data),
+  });
+  // Keep only last 50 logs
+  if (logs.length > 50) logs.shift();
+  await chrome.storage.local.set({ phantom_logs: logs });
+}
+
+// ---------------------------------------------------------------------------
+// SSO Flow
 // ---------------------------------------------------------------------------
 
 async function initiateSSOFlow(): Promise<PhantomSession> {
-  const redirectUrl = chrome.identity.getRedirectURL("callback");
+  console.log("[Phantom] Starting SSO flow...");
+  await logToStorage("SSO_START", { appId: PHANTOM_APP_ID });
   
-  // 1. Generate stamper keypair
-  const { publicKey, secretKey } = await generateStamperKeypair();
-  const sessionId = generateSessionId();
-
-  // 2. Build SSO URL
+  const redirectUrl = chrome.identity.getRedirectURL("callback");
+  console.log("[Phantom] Redirect URL:", redirectUrl);
+  await logToStorage("REDIRECT_URL", redirectUrl);
+  
+  // Build SSO URL exactly as per Phantom docs
+  // Note: We're NOT generating keys client-side - Phantom handles that
   const params = new URLSearchParams({
-    provider: "google", // Phantom supports google, apple, email
     app_id: PHANTOM_APP_ID,
     redirect_uri: redirectUrl,
-    public_key: publicKey,
-    session_id: sessionId,
-    sdk_version: "1.0.0",
-    sdk_type: "phantom-agent",
+    provider: "google",
   });
-
-  const ssoUrl = `${PHANTOM_CONNECT_URL}?${params.toString()}`;
-
-  // 3. Launch WebAuthFlow
-  const responseUrl = await new Promise<string>((resolve, reject) => {
-    chrome.identity.launchWebAuthFlow(
-      { url: ssoUrl, interactive: true },
-      (url) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
+  
+  const ssoUrl = `https://connect.phantom.app/login?${params.toString()}`;
+  console.log("[Phantom] SSO URL:", ssoUrl);
+  await logToStorage("SSO_URL", ssoUrl);
+  
+  // Launch auth flow
+  let responseUrl: string;
+  try {
+    responseUrl = await new Promise((resolve, reject) => {
+      chrome.identity.launchWebAuthFlow(
+        { url: ssoUrl, interactive: true },
+        (url) => {
+          if (chrome.runtime.lastError) {
+            const err = chrome.runtime.lastError.message;
+            console.error("[Phantom] launchWebAuthFlow error:", err);
+            reject(new Error(`Chrome error: ${err}`));
+            return;
+          }
+          if (!url) {
+            reject(new Error("No redirect URL returned"));
+            return;
+          }
+          resolve(url);
         }
-        if (!url) {
-          reject(new Error("SSO flow completed with no redirect URL."));
-          return;
-        }
-        resolve(url);
-      }
-    );
-  });
-
-  // 4. Parse callback params
-  const redirectParams = new URL(responseUrl).searchParams;
-  const returnedSessionId = redirectParams.get("session_id");
-  const walletId = redirectParams.get("wallet_id");
-  const organizationId = redirectParams.get("organization_id");
-  const authUserId = redirectParams.get("auth_user_id");
-  const error = redirectParams.get("error");
-
+      );
+    });
+  } catch (error) {
+    await logToStorage("WEBAUTH_ERROR", error);
+    throw error;
+  }
+  
+  console.log("[Phantom] Got response URL:", responseUrl);
+  await logToStorage("RESPONSE_URL", responseUrl);
+  
+  // Parse the response
+  const url = new URL(responseUrl);
+  const searchParams = url.searchParams;
+  
+  const error = searchParams.get("error");
+  const errorDescription = searchParams.get("error_description");
+  
   if (error) {
-    throw new Error(`SSO error: ${error} — ${redirectParams.get("error_description") ?? ""}`);
+    const errMsg = `Auth error: ${error}${errorDescription ? ` - ${errorDescription}` : ""}`;
+    console.error("[Phantom]", errMsg);
+    await logToStorage("AUTH_ERROR", { error, errorDescription });
+    throw new Error(errMsg);
   }
-
-  if (returnedSessionId !== sessionId) {
-    throw new Error("SSO session ID mismatch — possible CSRF attack. Aborting.");
+  
+  // Extract tokens/data from URL
+  // Phantom returns wallet info in the URL after successful auth
+  const walletId = searchParams.get("wallet_id");
+  const organizationId = searchParams.get("organization_id");
+  const userId = searchParams.get("user_id") || searchParams.get("auth_user_id");
+  const publicKey = searchParams.get("public_key");
+  
+  console.log("[Phantom] Response params:", { walletId, organizationId, userId, publicKey });
+  await logToStorage("RESPONSE_PARAMS", { walletId, organizationId, userId, hasPublicKey: !!publicKey });
+  
+  if (!walletId || !organizationId || !userId) {
+    const missing = [];
+    if (!walletId) missing.push("wallet_id");
+    if (!organizationId) missing.push("organization_id");
+    if (!userId) missing.push("user_id/auth_user_id");
+    const err = `Missing required params: ${missing.join(", ")}`;
+    await logToStorage("MISSING_PARAMS", { walletId, organizationId, userId });
+    throw new Error(err);
   }
-
-  if (!walletId || !organizationId || !authUserId) {
-    throw new Error("SSO callback missing required wallet data.");
-  }
-
-  // 5. Build and store session
+  
   const session: PhantomSession = {
-    userId: authUserId,
+    userId,
     walletId,
     organizationId,
-    stamperSecretKey: secretKey,
-    stamperPublicKey: publicKey,
+    publicKey: publicKey || "",
     createdAt: Date.now(),
   };
-
+  
   await saveSession(session);
-
-  // 6. Register with Convex backend (optional, for validation)
-  const convexUrl = process.env.VITE_CONVEX_SITE_URL ?? "";
-  if (convexUrl) {
-    try {
+  await logToStorage("SESSION_SAVED", session);
+  
+  // Register with Convex
+  try {
+    const convexUrl = process.env.VITE_CONVEX_SITE_URL;
+    if (convexUrl) {
       await fetch(`${convexUrl}/auth/register-session`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: authUserId,
+          userId,
           walletId,
           organizationId,
-          sessionToken: "stamper-auth", // Placeholder — Convex validates via session lookup
-          stamperSecretKey: secretKey,
+          sessionToken: publicKey || walletId,
         }),
       });
-    } catch {
-      // Non-fatal: the Convex mutation is also callable directly from the UI
     }
+  } catch (e) {
+    console.warn("[Phantom] Convex registration failed:", e);
   }
-
-  broadcastSessionChange(session);
+  
   return session;
 }
 
-async function disconnect(): Promise<void> {
-  await clearSession();
-  broadcastSessionChange(null);
-}
-
 // ---------------------------------------------------------------------------
-// Message handler
+// Message Handler
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener(
-  (message: ExtensionMessage, _sender, sendResponse: (response: ExtensionMessage) => void) => {
-    switch (message.type) {
-      case "GET_SESSION": {
-        loadSession()
-          .then((session) => {
-            sendResponse({ type: "SESSION_RESULT", session });
-          })
-          .catch(() => {
-            sendResponse({ type: "SESSION_RESULT", session: null });
+chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
+  console.log("[Phantom] Message received:", message.type);
+  
+  switch (message.type) {
+    case "GET_SESSION":
+      loadSession()
+        .then(session => sendResponse({ type: "SESSION_RESULT", session }))
+        .catch(err => sendResponse({ 
+          type: "ERROR", 
+          message: err.message,
+          details: err.stack 
+        }));
+      return true;
+      
+    case "CONNECT":
+      initiateSSOFlow()
+        .then(session => sendResponse({ type: "SESSION_RESULT", session }))
+        .catch(err => {
+          logToStorage("CONNECT_ERROR", { message: err.message, stack: err.stack });
+          sendResponse({
+            type: "ERROR",
+            message: err.message,
+            details: err.stack,
           });
-        return true; // Async response
-      }
-
-      case "CONNECT": {
-        initiateSSOFlow()
-          .then((session) => {
-            sendResponse({ type: "SESSION_RESULT", session });
-          })
-          .catch((err: unknown) => {
-            sendResponse({
-              type: "ERROR",
-              message: err instanceof Error ? err.message : "Connection failed.",
-            });
-          });
-        return true;
-      }
-
-      case "DISCONNECT": {
-        disconnect()
-          .then(() => {
-            sendResponse({ type: "SESSION_RESULT", session: null });
-          })
-          .catch(() => {
-            sendResponse({ type: "SESSION_RESULT", session: null });
-          });
-        return true;
-      }
-
-      default:
-        return false;
-    }
+        });
+      return true;
+      
+    case "DISCONNECT":
+      clearSession()
+        .then(() => sendResponse({ type: "SESSION_RESULT", session: null }))
+        .catch(err => sendResponse({ type: "ERROR", message: err.message }));
+      return true;
+      
+    default:
+      return false;
   }
-);
-
-// ---------------------------------------------------------------------------
-// Side panel open on click
-// ---------------------------------------------------------------------------
-
-chrome.action.onClicked.addListener((tab) => {
-  if (tab.id === undefined) return;
-  void chrome.sidePanel.open({ tabId: tab.id });
 });
 
 // ---------------------------------------------------------------------------
-// Startup
+// Side Panel
 // ---------------------------------------------------------------------------
 
-async function init(): Promise<void> {
-  const session = await loadSession();
-  if (session) {
-    log.info("Session restored", { walletId: session.walletId });
-  }
-}
+chrome.action.onClicked.addListener((tab) => {
+  if (tab.id) chrome.sidePanel.open({ tabId: tab.id });
+});
 
-const log = {
-  info: (msg: string, meta?: object) => console.log(`[BG] ${msg}`, meta ?? ""),
-  error: (msg: string, err?: unknown) => console.error(`[BG] ${msg}`, err ?? ""),
-};
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 
-void init();
+console.log("[Phantom] Background service worker loaded");
+console.log("[Phantom] App ID:", PHANTOM_APP_ID);

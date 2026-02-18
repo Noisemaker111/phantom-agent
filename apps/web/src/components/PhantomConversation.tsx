@@ -1,109 +1,90 @@
 /// <reference types="chrome" />
 /**
  * PhantomConversation — shared conversation UI component.
- *
- * Used by both sidepanel.tsx (full-height, docked) and popup.tsx
- * (600×400px, constrained). The component adapts to available height
- * via the `compact` prop.
- *
- * Authentication state is read from chrome.storage.local via the
- * background service worker message protocol. When unauthenticated,
- * renders a single "Connect" prompt. When authenticated, renders the
- * full streaming conversation UI.
- *
- * Convex integration uses useUIMessages + useSmoothText from
- * @convex-dev/agent/react, preserving the pattern from the original ai.tsx.
  */
 
 import { useUIMessages, useSmoothText, type UIMessage } from "@convex-dev/agent/react";
 import { api } from "@phantom-agent-base/backend/convex/_generated/api";
 import { useMutation } from "convex/react";
-import { Loader2, Send, Wallet, LogOut } from "lucide-react";
+import { Loader2, Send, Wallet, LogOut, Bug } from "lucide-react";
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Streamdown } from "streamdown";
 
 import type { PhantomSession, ExtensionMessage } from "../background";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 type ConversationProps = {
-  /** Render in compact mode for the popup (600×400). Default: false (side panel). */
   compact?: boolean;
 };
-
-// ---------------------------------------------------------------------------
-// Background service worker communication
-// ---------------------------------------------------------------------------
 
 function sendBackgroundMessage(message: ExtensionMessage): Promise<ExtensionMessage> {
   return chrome.runtime.sendMessage(message) as Promise<ExtensionMessage>;
 }
 
-// ---------------------------------------------------------------------------
-// Smooth streaming text renderer
-// ---------------------------------------------------------------------------
-
-function MessageContent({
-  text,
-  isStreaming,
-}: {
-  text: string;
-  isStreaming: boolean;
-}): React.JSX.Element {
+function MessageContent({ text, isStreaming }: { text: string; isStreaming: boolean }) {
   const [visibleText] = useSmoothText(text, { startStreaming: isStreaming });
   return <Streamdown>{visibleText}</Streamdown>;
 }
 
-// ---------------------------------------------------------------------------
-// Approve / Reject inline action buttons
-// ---------------------------------------------------------------------------
+// Debug panel to view background script logs
+function DebugPanel({ onClose }: { onClose: () => void }) {
+  const [logs, setLogs] = useState<any[]>([]);
 
-/**
- * Renders [Approve] [Reject] buttons when the agent's message contains them.
- * The buttons send the user's decision back as a text message rather than
- * calling the approval mutation directly, so the agent can confirm the
- * outcome in the conversation.
- */
-function ApprovalActions({
-  onDecision,
-}: {
-  onDecision: (decision: "approve" | "reject") => void;
-}): React.JSX.Element {
+  useEffect(() => {
+    chrome.storage.local.get("phantom_logs").then((result) => {
+      setLogs(result.phantom_logs || []);
+    });
+  }, []);
+
+  const clearLogs = () => {
+    chrome.storage.local.remove("phantom_logs");
+    setLogs([]);
+  };
+
   return (
-    <div className="flex gap-2 mt-3">
-      <button
-        type="button"
-        onClick={() => onDecision("approve")}
-        className="px-4 py-1.5 text-sm font-medium rounded-md bg-green-600 hover:bg-green-500 text-white transition-colors"
-      >
-        Approve
-      </button>
-      <button
-        type="button"
-        onClick={() => onDecision("reject")}
-        className="px-4 py-1.5 text-sm font-medium rounded-md bg-red-700 hover:bg-red-600 text-white transition-colors"
-      >
-        Reject
-      </button>
+    <div className="fixed inset-0 bg-black/80 z-50 p-4 overflow-auto">
+      <div className="bg-background max-w-2xl mx-auto rounded-lg p-4">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-lg font-bold">Debug Logs</h2>
+          <div className="flex gap-2">
+            <button onClick={clearLogs} className="px-3 py-1 bg-red-600 text-white rounded text-sm">
+              Clear
+            </button>
+            <button onClick={onClose} className="px-3 py-1 bg-gray-600 text-white rounded text-sm">
+              Close
+            </button>
+          </div>
+        </div>
+        <div className="space-y-2 font-mono text-xs">
+          {logs.length === 0 && <p className="text-muted-foreground">No logs yet</p>}
+          {logs.map((log, i) => (
+            <div key={i} className="border-b border-border pb-2">
+              <div className="text-muted-foreground">
+                {new Date(log.timestamp).toLocaleTimeString()} - {log.context}
+              </div>
+              <div className="text-foreground break-all">{log.data}</div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Connect screen — shown when not authenticated
-// ---------------------------------------------------------------------------
 
 function ConnectScreen({
   onConnect,
   isConnecting,
   error,
+  errorDetails,
+  onShowDebug,
 }: {
   onConnect: () => void;
   isConnecting: boolean;
   error: string | null;
-}): React.JSX.Element {
+  errorDetails?: string;
+  onShowDebug: () => void;
+}) {
+  const [showDetails, setShowDetails] = useState(false);
+
   return (
     <div className="flex flex-col items-center justify-center h-full gap-6 p-8 text-center">
       <div className="flex flex-col items-center gap-3">
@@ -117,9 +98,25 @@ function ConnectScreen({
       </div>
 
       {error && (
-        <p className="text-xs text-destructive bg-destructive/10 rounded-md px-3 py-2 max-w-[280px]">
-          {error}
-        </p>
+        <div className="w-full max-w-[320px]">
+          <div className="text-xs text-destructive bg-destructive/10 rounded-md px-3 py-2">
+            <p className="font-semibold mb-1">Error:</p>
+            <p>{error}</p>
+            {errorDetails && (
+              <button
+                onClick={() => setShowDetails(!showDetails)}
+                className="text-muted-foreground underline mt-2"
+              >
+                {showDetails ? "Hide details" : "Show details"}
+              </button>
+            )}
+          </div>
+          {showDetails && errorDetails && (
+            <div className="mt-2 p-2 bg-black/50 rounded text-xs font-mono text-left overflow-auto max-h-[200px]">
+              <pre className="whitespace-pre-wrap break-all">{errorDetails}</pre>
+            </div>
+          )}
+        </div>
       )}
 
       <button
@@ -140,19 +137,25 @@ function ConnectScreen({
           </>
         )}
       </button>
+
+      <button
+        onClick={onShowDebug}
+        className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+      >
+        <Bug className="w-3 h-3" />
+        View Debug Logs
+      </button>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Main conversation component
-// ---------------------------------------------------------------------------
 
 export function PhantomConversation({ compact = false }: ConversationProps): React.JSX.Element {
   const [session, setSession] = useState<PhantomSession | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectErrorDetails, setConnectErrorDetails] = useState<string | undefined>(undefined);
+  const [showDebug, setShowDebug] = useState(false);
 
   const [input, setInput] = useState("");
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -163,10 +166,6 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
 
   const createThread = useMutation(api.chat.createNewThread);
   const sendMessageMutation = useMutation(api.chat.sendMessage);
-
-  // ---------------------------------------------------------------------------
-  // Session loading
-  // ---------------------------------------------------------------------------
 
   const loadSession = useCallback(async () => {
     try {
@@ -184,12 +183,10 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
   useEffect(() => {
     void loadSession();
 
-    // Listen for session changes broadcast from the background service worker
     const handleMessage = (message: ExtensionMessage) => {
       if (message.type === "SESSION_CHANGED") {
         setSession(message.session);
         if (!message.session) {
-          // Session cleared — reset conversation state
           setThreadId(null);
         }
       }
@@ -199,24 +196,39 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
     return () => chrome.runtime.onMessage.removeListener(handleMessage);
   }, [loadSession]);
 
-  // ---------------------------------------------------------------------------
-  // Connect / disconnect
-  // ---------------------------------------------------------------------------
+  const { results: messages } = useUIMessages(
+    api.chat.listMessages,
+    threadId ? { threadId } : "skip",
+    { initialNumItems: 50, stream: true }
+  );
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const hasStreamingMessage = messages?.some((m: UIMessage) => m.status === "streaming");
 
   const handleConnect = useCallback(async () => {
     setIsConnecting(true);
     setConnectError(null);
+    setConnectErrorDetails(undefined);
+    
     try {
       const response = await sendBackgroundMessage({ type: "CONNECT" });
-      if (response.type === "SESSION_RESULT" && response.session) {
-        setSession(response.session);
-      } else if (response.type === "ERROR") {
+      
+      if (response.type === "ERROR") {
         setConnectError(response.message);
+        setConnectErrorDetails(response.details);
+      } else if (response.type === "SESSION_RESULT" && response.session) {
+        setSession(response.session);
+      } else {
+        setConnectError("Connection failed - no session returned");
       }
     } catch (err) {
-      setConnectError(
-        err instanceof Error ? err.message : "Connection failed. Please try again.",
-      );
+      const message = err instanceof Error ? err.message : "Connection failed";
+      const stack = err instanceof Error ? err.stack : undefined;
+      setConnectError(message);
+      setConnectErrorDetails(stack);
     } finally {
       setIsConnecting(false);
     }
@@ -228,26 +240,6 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
     setThreadId(null);
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Message subscription
-  // ---------------------------------------------------------------------------
-
-  const { results: messages } = useUIMessages(
-    api.chat.listMessages,
-    threadId ? { threadId } : "skip",
-    { initialNumItems: 50, stream: true },
-  );
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const hasStreamingMessage = messages?.some((m: UIMessage) => m.status === "streaming");
-
-  // ---------------------------------------------------------------------------
-  // Send message
-  // ---------------------------------------------------------------------------
-
   const handleSend = useCallback(
     async (text: string) => {
       if (!text.trim() || isSending || !session) return;
@@ -257,14 +249,13 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
       try {
         let currentThreadId = threadId;
         if (!currentThreadId) {
-          currentThreadId = await createThread({ sessionToken: session.stamperPublicKey });
+          currentThreadId = await createThread({ sessionToken: session.publicKey || session.walletId });
           setThreadId(currentThreadId);
         }
         await sendMessageMutation({
           threadId: currentThreadId,
           prompt: text.trim(),
-          sessionToken: session.stamperPublicKey,
-          stamperSecretKey: session.stamperSecretKey,
+          sessionToken: session.publicKey || session.walletId,
         });
       } catch (err) {
         console.error("Failed to send message:", err);
@@ -272,7 +263,7 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
         setIsSending(false);
       }
     },
-    [isSending, session, threadId, createThread, sendMessageMutation],
+    [isSending, session, threadId, createThread, sendMessageMutation]
   );
 
   const handleSubmit = useCallback(
@@ -280,7 +271,7 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
       e.preventDefault();
       void handleSend(input);
     },
-    [handleSend, input],
+    [handleSend, input]
   );
 
   const handleKeyDown = useCallback(
@@ -290,20 +281,8 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
         void handleSend(input);
       }
     },
-    [handleSend, input],
+    [handleSend, input]
   );
-
-  // Handle approval decision — send as a natural language message
-  const handleApprovalDecision = useCallback(
-    (decision: "approve" | "reject") => {
-      void handleSend(decision === "approve" ? "approve" : "reject");
-    },
-    [handleSend],
-  );
-
-  // ---------------------------------------------------------------------------
-  // Render states
-  // ---------------------------------------------------------------------------
 
   if (isLoadingSession) {
     return (
@@ -315,21 +294,21 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
 
   if (!session) {
     return (
-      <ConnectScreen
-        onConnect={handleConnect}
-        isConnecting={isConnecting}
-        error={connectError}
-      />
+      <>
+        {showDebug && <DebugPanel onClose={() => setShowDebug(false)} />}
+        <ConnectScreen
+          onConnect={handleConnect}
+          isConnecting={isConnecting}
+          error={connectError}
+          errorDetails={connectErrorDetails}
+          onShowDebug={() => setShowDebug(true)}
+        />
+      </>
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Authenticated conversation view
-  // ---------------------------------------------------------------------------
-
   return (
     <div className={`flex flex-col bg-background text-foreground ${compact ? "h-[600px] w-[400px]" : "h-screen"}`}>
-      {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md bg-purple-600/20 flex items-center justify-center">
@@ -337,68 +316,56 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
           </div>
           <span className="text-sm font-medium">Phantom Agent</span>
         </div>
-        <button
-          type="button"
-          onClick={() => void handleDisconnect()}
-          className="p-1.5 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          title="Disconnect wallet"
-        >
-          <LogOut className="w-4 h-4" />
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowDebug(true)}
+            className="p-1.5 rounded-md hover:bg-muted text-muted-foreground"
+            title="Debug"
+          >
+            <Bug className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => void handleDisconnect()}
+            className="p-1.5 rounded-md hover:bg-muted text-muted-foreground"
+            title="Disconnect"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+        </div>
       </header>
 
-      {/* Message list */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 min-h-0">
-        {(!messages || messages.length === 0) && !hasStreamingMessage && (
+      {showDebug && <DebugPanel onClose={() => setShowDebug(false)} />}
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {(!messages || messages.length === 0) && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
-            <p className="text-sm text-muted-foreground">
-              What would you like to do with your wallet?
-            </p>
-            <p className="text-xs text-muted-foreground/60">
-              Try "swap 1 SOL to BONK" or "what's my Ethereum address"
-            </p>
+            <p className="text-sm text-muted-foreground">What would you like to do with your wallet?</p>
           </div>
         )}
 
-        {messages?.map((message: UIMessage) => {
-          const isAgent = message.role === "assistant";
-          const text = message.text ?? "";
-          const isStreaming = message.status === "streaming";
-          const hasApprovalButtons =
-            isAgent && text.includes("[Approve]") && text.includes("[Reject]");
-
-          return (
+        {messages?.map((message: UIMessage) => (
+          <div
+            key={message.key}
+            className={`flex ${message.role === "assistant" ? "justify-start" : "justify-end"}`}
+          >
             <div
-              key={message.key}
-              className={`flex ${isAgent ? "justify-start" : "justify-end"}`}
+              className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm ${
+                message.role === "assistant"
+                  ? "bg-muted text-foreground"
+                  : "bg-purple-600 text-white"
+              }`}
             >
-              <div
-                className={`
-                  max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed
-                  ${isAgent
-                    ? "bg-muted text-foreground rounded-tl-sm"
-                    : "bg-purple-600 text-white rounded-tr-sm"
-                  }
-                `}
-              >
-                {isAgent ? (
-                  <>
-                    <MessageContent text={text} isStreaming={isStreaming} />
-                    {hasApprovalButtons && !isStreaming && (
-                      <ApprovalActions onDecision={handleApprovalDecision} />
-                    )}
-                  </>
-                ) : (
-                  <span className="whitespace-pre-wrap">{text}</span>
-                )}
-              </div>
+              {message.role === "assistant" ? (
+                <MessageContent text={message.text || ""} isStreaming={message.status === "streaming"} />
+              ) : (
+                <span>{message.text}</span>
+              )}
             </div>
-          );
-        })}
+          </div>
+        ))}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input area */}
       <div className="shrink-0 border-t border-border px-4 py-3">
         <form onSubmit={handleSubmit} className="flex items-end gap-2">
           <textarea
@@ -406,39 +373,16 @@ export function PhantomConversation({ compact = false }: ConversationProps): Rea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message Phantom Agent…"
-            rows={1}
-            className="
-              flex-1 resize-none bg-muted rounded-xl px-3 py-2.5 text-sm
-              placeholder:text-muted-foreground/60 outline-none focus:ring-1
-              focus:ring-purple-500/60 min-h-[40px] max-h-[120px]
-              leading-relaxed transition-shadow
-            "
-            style={{
-              height: "auto",
-              minHeight: "40px",
-            }}
-            onInput={(e) => {
-              const target = e.currentTarget;
-              target.style.height = "auto";
-              target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
-            }}
+            placeholder="Message..."
+            className="flex-1 resize-none bg-muted rounded-xl px-3 py-2.5 text-sm min-h-[40px] max-h-[120px]"
             disabled={isSending}
           />
           <button
             type="submit"
             disabled={!input.trim() || isSending}
-            className="
-              p-2.5 rounded-xl bg-purple-600 hover:bg-purple-500
-              disabled:opacity-40 disabled:cursor-not-allowed
-              text-white transition-colors shrink-0
-            "
+            className="p-2.5 rounded-xl bg-purple-600 text-white disabled:opacity-40"
           >
-            {isSending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Send className="w-4 h-4" />
-            )}
+            {isSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
         </form>
       </div>
