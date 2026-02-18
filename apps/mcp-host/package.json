@@ -1,0 +1,28 @@
+{
+  "name": "@phantom-agent-base/mcp-host",
+  "version": "0.1.0",
+  "description": "Hosted REST shim for @phantom/mcp-server. Deployed on Railway; called by the Convex backend.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "check-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@phantom/api-key-stamper": "^1.0.2",
+    "@phantom/client": "^1.0.2",
+    "@phantom/mcp-server": "0.1.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

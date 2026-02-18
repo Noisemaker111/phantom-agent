@@ -1,0 +1,3 @@
+{
+  "extends": "@phantom-agent-base/config/tsconfig.base.json"
+}

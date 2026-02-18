@@ -1,0 +1,29 @@
+{
+  "name": "phantom-agent-base",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "check-types": "turbo check-types",
+    "dev:native": "turbo -F native dev",
+    "dev:web": "turbo -F web dev",
+    "dev:server": "turbo -F @phantom-agent-base/backend dev",
+    "dev:setup": "turbo -F @phantom-agent-base/backend dev:setup"
+  },
+  "dependencies": {
+    "@phantom-agent-base/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@phantom-agent-base/config": "workspace:*",
+    "turbo": "^2.6.3",
+    "typescript": "catalog:"
+  },
+  "packageManager": "pnpm@10.18.2"
+}

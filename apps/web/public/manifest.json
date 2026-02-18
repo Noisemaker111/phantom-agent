@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "Phantom Agent",
+  "version": "0.1.0",
+  "description": "Natural language control over your Phantom embedded wallet.",
+
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvGumQVezpcPX9eb6Zx+4zJSGwg7fneRWoiIu1Gl87vU+edut9JFgKMN/uYLxfjtjPbAxeIHhRzvVK4qpwmcVTu8NDCm2blj2ABmV5d7C+9Sz1LdsYd4xGWJne5mOI8vzzsmVv0UULzTBrHV5zmPMhxF90Fgr0REvbbpXotSkBchliJK0X8pXrb60FHRmkg1EPit47OeESZiE8uBoOuPWL2R/Br28MDyt+JKvbr/Q6Z9CTp10wN8BVK0u5LGfhNhLKlUE+O3LOqw6yMhpbvoZDdwxchjgO/YuQcwo4+QunSo2EpegiQU9j5JaPZaIxqj/xcYpv+2jaBDBDfJflrFaLQIDAQAB",
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_title": "Phantom Agent"
+  },
+
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "permissions": [
+    "storage",
+    "identity",
+    "sidePanel",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "https://connect.phantom.app/*",
+    "https://*.convex.cloud/*",
+    "https://*.convex.site/*"
+  ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["*.js", "*.css", "*.html", "*.png", "*.svg", "*.woff2"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

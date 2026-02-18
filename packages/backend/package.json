@@ -1,0 +1,24 @@
+{
+  "name": "@phantom-agent-base/backend",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "scripts": {
+    "dev": "convex dev",
+    "dev:setup": "convex dev --configure --until-success"
+  },
+  "dependencies": {
+    "@openrouter/ai-sdk-provider": "1.5.4",
+    "@convex-dev/agent": "catalog:",
+    "ai": "^5.0.117",
+    "convex": "catalog:",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@phantom-agent-base/config": "workspace:*",
+    "@types/node": "^24.3.0",
+    "typescript": "catalog:"
+  }
+}
