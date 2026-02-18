@@ -15,7 +15,8 @@
     },
     "dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "env": ["VITE_*", "OPENROUTER_API_KEY", "PHANTOM_MCP_*"]
     },
     "dev:setup": {
       "cache": false,
