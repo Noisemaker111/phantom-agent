@@ -43,7 +43,8 @@
     "storage",
     "identity",
     "sidePanel",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
 
   "externally_connectable": {

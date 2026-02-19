@@ -1,7 +1,7 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Uses content script to communicate with Phantom wallet (avoids CSP issues)
+ * Injects content script programmatically to ensure it's loaded
  */
 
 /// <reference types="chrome" />
@@ -53,64 +53,105 @@ function broadcastSessionChange(session: PhantomSession | null): void {
 }
 
 // ---------------------------------------------------------------------------
+// Ensure content script is injected
+// ---------------------------------------------------------------------------
+
+async function ensureContentScript(tabId: number): Promise<void> {
+  try {
+    // Try to ping the content script
+    await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    console.log("[Phantom] Content script already injected");
+  } catch {
+    // Content script not loaded, inject it
+    console.log("[Phantom] Injecting content script...");
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"],
+    });
+    console.log("[Phantom] Content script injected");
+    // Wait a moment for it to initialize
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Connect using Phantom via content script
 // ---------------------------------------------------------------------------
 
 async function initiateAuth(): Promise<PhantomSession> {
-  console.log("[Phantom] Starting auth via content script...");
-  await logToStorage("CONTENT_AUTH_START", {});
+  console.log("[Phantom] Starting auth...");
+  await logToStorage("AUTH_START", {});
   
-  // Find an active tab to inject content script
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length === 0 || !tabs[0].id) {
-    throw new Error("No active tab found");
+  // Get or create a tab for auth
+  let tabId: number;
+  
+  try {
+    // Try to use current active tab
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs.length > 0 && tabs[0].id && tabs[0].url?.startsWith("http")) {
+      tabId = tabs[0].id;
+      console.log("[Phantom] Using current tab:", tabId);
+    } else {
+      // Create a new tab
+      console.log("[Phantom] Creating new tab...");
+      const tab = await chrome.tabs.create({
+        url: "https://phantom.app",
+        active: true,
+      });
+      if (!tab.id) throw new Error("Failed to create tab");
+      tabId = tab.id;
+      // Wait for page load
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    
+    // Ensure content script is loaded
+    await ensureContentScript(tabId);
+    
+    // Check for Phantom
+    console.log("[Phantom] Checking for Phantom...");
+    const checkResponse = await chrome.tabs.sendMessage(tabId, { type: "CHECK_PHANTOM" });
+    console.log("[Phantom] Check response:", checkResponse);
+    await logToStorage("PHANTOM_CHECK", checkResponse);
+    
+    if (!checkResponse?.hasPhantom) {
+      chrome.tabs.create({
+        url: "https://phantom.app/download",
+        active: true,
+      });
+      throw new Error("Phantom wallet not detected. Please install the Phantom browser extension and refresh.");
+    }
+    
+    // Connect
+    console.log("[Phantom] Connecting...");
+    const connectResponse = await chrome.tabs.sendMessage(tabId, { type: "CONNECT_PHANTOM" });
+    console.log("[Phantom] Connect response:", connectResponse);
+    await logToStorage("CONNECT_RESPONSE", connectResponse);
+    
+    if (connectResponse?.error) {
+      throw new Error(connectResponse.error);
+    }
+    
+    if (!connectResponse?.success || !connectResponse?.publicKey) {
+      throw new Error("Connection failed");
+    }
+    
+    // Build session
+    const session: PhantomSession = {
+      userId: connectResponse.publicKey,
+      walletId: connectResponse.publicKey,
+      organizationId: "phantom-browser",
+      publicKey: connectResponse.publicKey,
+      createdAt: Date.now(),
+    };
+    
+    await saveSession(session);
+    broadcastSessionChange(session);
+    
+    return session;
+  } catch (error) {
+    console.error("[Phantom] Auth error:", error);
+    throw error;
   }
-  
-  const tabId = tabs[0].id;
-  console.log("[Phantom] Using tab:", tabId);
-  
-  // First check if Phantom is available
-  console.log("[Phantom] Checking for Phantom...");
-  const checkResponse = await chrome.tabs.sendMessage(tabId, { type: "CHECK_PHANTOM" });
-  console.log("[Phantom] Check response:", checkResponse);
-  await logToStorage("PHANTOM_CHECK", checkResponse);
-  
-  if (!checkResponse?.hasPhantom) {
-    // Open Phantom download page
-    chrome.tabs.create({
-      url: "https://phantom.app/download",
-      active: true,
-    });
-    throw new Error("Phantom wallet extension not detected. Please install it and refresh the page.");
-  }
-  
-  // Try to connect
-  console.log("[Phantom] Connecting...");
-  const connectResponse = await chrome.tabs.sendMessage(tabId, { type: "CONNECT_PHANTOM" });
-  console.log("[Phantom] Connect response:", connectResponse);
-  await logToStorage("CONNECT_RESPONSE", connectResponse);
-  
-  if (connectResponse?.error) {
-    throw new Error(connectResponse.error);
-  }
-  
-  if (!connectResponse?.success || !connectResponse?.publicKey) {
-    throw new Error("Connection failed - no public key returned");
-  }
-  
-  // Build session
-  const session: PhantomSession = {
-    userId: connectResponse.publicKey,
-    walletId: connectResponse.publicKey,
-    organizationId: "phantom-browser",
-    publicKey: connectResponse.publicKey,
-    createdAt: Date.now(),
-  };
-  
-  await saveSession(session);
-  broadcastSessionChange(session);
-  
-  return session;
 }
 
 async function disconnect(): Promise<void> {

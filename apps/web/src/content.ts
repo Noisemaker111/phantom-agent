@@ -16,6 +16,11 @@ console.log("[Phantom Agent] Content script loaded");
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   console.log("[Phantom Agent Content] Received message:", request.type);
 
+  if (request.type === "PING") {
+    sendResponse({ pong: true });
+    return true;
+  }
+
   if (request.type === "CHECK_PHANTOM") {
     // Check if window.phantom exists
     const hasPhantom = typeof win.phantom !== "undefined";
