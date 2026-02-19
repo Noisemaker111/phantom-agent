@@ -1,10 +1,13 @@
 /**
  * Phantom Agent — Chrome Extension Background Service Worker
  * 
- * Injects content script programmatically to ensure it's loaded
+ * Supports both Phantom browser extension AND web-based auth
  */
 
 /// <reference types="chrome" />
+
+const PHANTOM_APP_ID = "d3e0eba3-5c4b-40ed-9417-37ff874d9f6e";
+const CONVEX_SITE_URL = "https://tough-nightingale-94.convex.site";
 
 export type PhantomSession = {
   userId: string;
@@ -21,6 +24,10 @@ export type ExtensionMessage =
   | { type: "SESSION_CHANGED"; session: PhantomSession | null }
   | { type: "SESSION_RESULT"; session: PhantomSession | null }
   | { type: "ERROR"; message: string; details?: string };
+
+let authTabId: number | null = null;
+let pendingResolve: ((s: PhantomSession) => void) | null = null;
+let pendingReject: ((e: Error) => void) | null = null;
 
 async function logToStorage(context: string, data: unknown): Promise<void> {
   const result = await chrome.storage.local.get("phantom_logs");
@@ -58,101 +65,192 @@ function broadcastSessionChange(session: PhantomSession | null): void {
 
 async function ensureContentScript(tabId: number): Promise<void> {
   try {
-    // Try to ping the content script
     await chrome.tabs.sendMessage(tabId, { type: "PING" });
     console.log("[Phantom] Content script already injected");
   } catch {
-    // Content script not loaded, inject it
     console.log("[Phantom] Injecting content script...");
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ["content.js"],
     });
     console.log("[Phantom] Content script injected");
-    // Wait a moment for it to initialize
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
 
 // ---------------------------------------------------------------------------
-// Connect using Phantom via content script
+// Method 1: Try browser extension
 // ---------------------------------------------------------------------------
 
-async function initiateAuth(): Promise<PhantomSession> {
-  console.log("[Phantom] Starting auth...");
-  await logToStorage("AUTH_START", {});
+async function tryBrowserExtension(): Promise<PhantomSession | null> {
+  console.log("[Phantom] Trying browser extension...");
+  await logToStorage("TRY_EXTENSION", {});
   
-  // Get or create a tab for auth
-  let tabId: number;
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length === 0 || !tabs[0].id || !tabs[0].url?.startsWith("http")) {
+    console.log("[Phantom] No suitable tab for extension check");
+    return null;
+  }
+  
+  const tabId = tabs[0].id;
   
   try {
-    // Try to use current active tab
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tabs.length > 0 && tabs[0].id && tabs[0].url?.startsWith("http")) {
-      tabId = tabs[0].id;
-      console.log("[Phantom] Using current tab:", tabId);
-    } else {
-      // Create a new tab
-      console.log("[Phantom] Creating new tab...");
-      const tab = await chrome.tabs.create({
-        url: "https://phantom.app",
-        active: true,
-      });
-      if (!tab.id) throw new Error("Failed to create tab");
-      tabId = tab.id;
-      // Wait for page load
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    }
-    
-    // Ensure content script is loaded
     await ensureContentScript(tabId);
     
-    // Check for Phantom
-    console.log("[Phantom] Checking for Phantom...");
     const checkResponse = await chrome.tabs.sendMessage(tabId, { type: "CHECK_PHANTOM" });
-    console.log("[Phantom] Check response:", checkResponse);
-    await logToStorage("PHANTOM_CHECK", checkResponse);
+    console.log("[Phantom] Extension check:", checkResponse);
     
     if (!checkResponse?.hasPhantom) {
-      chrome.tabs.create({
-        url: "https://phantom.app/download",
-        active: true,
-      });
-      throw new Error("Phantom wallet not detected. Please install the Phantom browser extension and refresh.");
+      console.log("[Phantom] Browser extension not detected");
+      return null;
     }
     
-    // Connect
-    console.log("[Phantom] Connecting...");
+    // Try to connect
     const connectResponse = await chrome.tabs.sendMessage(tabId, { type: "CONNECT_PHANTOM" });
-    console.log("[Phantom] Connect response:", connectResponse);
-    await logToStorage("CONNECT_RESPONSE", connectResponse);
+    console.log("[Phantom] Extension connect:", connectResponse);
+    await logToStorage("EXTENSION_CONNECT", connectResponse);
     
     if (connectResponse?.error) {
       throw new Error(connectResponse.error);
     }
     
     if (!connectResponse?.success || !connectResponse?.publicKey) {
-      throw new Error("Connection failed");
+      return null;
     }
     
-    // Build session
-    const session: PhantomSession = {
+    return {
       userId: connectResponse.publicKey,
       walletId: connectResponse.publicKey,
       organizationId: "phantom-browser",
       publicKey: connectResponse.publicKey,
       createdAt: Date.now(),
     };
-    
-    await saveSession(session);
-    broadcastSessionChange(session);
-    
-    return session;
   } catch (error) {
-    console.error("[Phantom] Auth error:", error);
-    throw error;
+    console.log("[Phantom] Extension method failed:", error);
+    return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Method 2: Use hosted web auth
+// ---------------------------------------------------------------------------
+
+async function tryWebAuth(): Promise<PhantomSession> {
+  console.log("[Phantom] Trying web auth...");
+  await logToStorage("TRY_WEB_AUTH", {});
+  
+  return new Promise((resolve, reject) => {
+    pendingResolve = resolve;
+    pendingReject = reject;
+    
+    const authUrl = `${CONVEX_SITE_URL}/auth/callback?extension_id=${chrome.runtime.id}`;
+    
+    chrome.tabs.create({ url: authUrl, active: true }, (tab) => {
+      if (!tab.id) {
+        cleanupAuth();
+        reject(new Error("Failed to open auth tab"));
+        return;
+      }
+      
+      authTabId = tab.id;
+      
+      // Timeout
+      setTimeout(() => {
+        if (authTabId === tab.id && pendingReject) {
+          chrome.tabs.remove(tab.id).catch(() => {});
+          pendingReject(new Error("Authentication timeout"));
+          cleanupAuth();
+        }
+      }, 300000);
+    });
+  });
+}
+
+function cleanupAuth(): void {
+  authTabId = null;
+  pendingResolve = null;
+  pendingReject = null;
+}
+
+// ---------------------------------------------------------------------------
+// Main auth flow - tries extension first, falls back to web
+// ---------------------------------------------------------------------------
+
+async function initiateAuth(): Promise<PhantomSession> {
+  console.log("[Phantom] Starting auth...");
+  await logToStorage("AUTH_START", {});
+  
+  // Try browser extension first
+  const extensionResult = await tryBrowserExtension();
+  if (extensionResult) {
+    await saveSession(extensionResult);
+    broadcastSessionChange(extensionResult);
+    return extensionResult;
+  }
+  
+  // Fall back to web auth
+  console.log("[Phantom] Falling back to web auth...");
+  const webResult = await tryWebAuth();
+  await saveSession(webResult);
+  broadcastSessionChange(webResult);
+  return webResult;
+}
+
+// ---------------------------------------------------------------------------
+// Listen for web auth completion
+// ---------------------------------------------------------------------------
+
+chrome.runtime.onMessageExternal.addListener((message: any, sender, sendResponse) => {
+  console.log("[Phantom] External message:", message?.type, "from:", sender.origin);
+  
+  if (!sender.origin?.includes("convex.site")) {
+    return false;
+  }
+  
+  if (message?.type === "AUTH_COMPLETE" && message.session) {
+    const session: PhantomSession = {
+      userId: message.session.userId,
+      walletId: message.session.walletId,
+      organizationId: message.session.organizationId,
+      publicKey: message.session.publicKey || "",
+      createdAt: Date.now(),
+    };
+    
+    if (pendingResolve) {
+      pendingResolve(session);
+      cleanupAuth();
+    }
+    
+    if (authTabId) {
+      chrome.tabs.remove(authTabId).catch(() => {});
+    }
+    
+    sendResponse({ success: true });
+    return true;
+  }
+  
+  if (message?.type === "AUTH_ERROR") {
+    if (pendingReject) {
+      pendingReject(new Error(message.error || "Authentication failed"));
+      cleanupAuth();
+    }
+    if (authTabId) {
+      chrome.tabs.remove(authTabId).catch(() => {});
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+  
+  return false;
+});
+
+// Listen for tab close
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === authTabId && pendingReject) {
+    pendingReject(new Error("Authentication cancelled"));
+    cleanupAuth();
+  }
+});
 
 async function disconnect(): Promise<void> {
   await clearSession();
